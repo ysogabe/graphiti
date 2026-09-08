@@ -1163,6 +1163,14 @@ async def initialize_server() -> ServerConfig:
     parser.add_argument(
         '--temperature', type=float, help='Temperature setting for the LLM (0.0-2.0)'
     )
+    parser.add_argument(
+        '--reasoning-effort',
+        help=(
+            'Reasoning effort for the LLM (e.g. low/medium/high). Only meaningful for '
+            'reasoning models that accept a value; forwarded to OpenAI-compatible endpoints '
+            '(e.g. b.ai).'
+        ),
+    )
 
     # Embedder configuration arguments
     parser.add_argument('--embedder-model', help='Model name to use with the embedder')

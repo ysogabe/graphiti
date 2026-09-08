@@ -17,6 +17,10 @@ llm:
   # Use json_object for OpenAI-compatible providers that accept json_schema
   # but do not reliably enforce the requested Pydantic schema.
   structured_output_mode: ${LLM_STRUCTURED_OUTPUT_MODE:json_schema}
+  # Reasoning effort for the extraction LLM (e.g. low/medium/high). Only set for
+  # reasoning models that accept a value; forwarded to OpenAI-compatible endpoints
+  # (e.g. b.ai). Leave unset for non-reasoning models.
+  reasoning_effort: ${LLM_REASONING_EFFORT:}
   
   providers:
     openai:

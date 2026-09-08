@@ -93,6 +93,25 @@ class TestLLMClientFactoryRouting:
         assert isinstance(client, OpenAIGenericClient)
         assert client.structured_output_mode == 'json_object'
 
+    def test_generic_client_uses_configured_reasoning_effort(self):
+        # b.ai (and any non-OpenAI-compatible endpoint) must forward a configured
+        # reasoning_effort so reasoning models (gpt-5.6-luna etc.) can be tuned.
+        config = self._config('https://api.b.ai/v1')
+        config.reasoning_effort = 'high'
+
+        client = LLMClientFactory.create(config)
+
+        assert isinstance(client, OpenAIGenericClient)
+        assert client.reasoning_effort == 'high'
+
+    def test_generic_client_defaults_reasoning_effort_to_none(self):
+        config = self._config('https://api.b.ai/v1')
+
+        client = LLMClientFactory.create(config)
+
+        assert isinstance(client, OpenAIGenericClient)
+        assert client.reasoning_effort is None
+
 
 class TestLLMClientReasoningEffort:
     """The OpenAI factory selects reasoning effort by model family."""

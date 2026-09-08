@@ -168,6 +168,7 @@ class LLMClientFactory:
                         config=llm_config,
                         max_tokens=config.max_tokens,
                         structured_output_mode=config.structured_output_mode,
+                        reasoning_effort=config.reasoning_effort,
                     )
                 else:
                     # Use OpenAIClient for official OpenAI API (supports Responses API).
