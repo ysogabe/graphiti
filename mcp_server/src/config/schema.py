@@ -111,11 +111,18 @@ class AnthropicProviderConfig(BaseModel):
 
 
 class GeminiProviderConfig(BaseModel):
-    """Gemini provider configuration."""
+    """Gemini / Vertex AI provider configuration."""
 
     api_key: str | None = None
     project_id: str | None = None
     location: str = 'us-central1'
+    vertexai: bool = Field(
+        default=False,
+        description=(
+            'Use Vertex AI (aiplatform.googleapis.com) for gemini models instead of the '
+            'Gemini Developer API. Requires project_id + location and a Vertex-bound API key.'
+        ),
+    )
 
 
 class GroqProviderConfig(BaseModel):

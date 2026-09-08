@@ -3,23 +3,29 @@
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 # Add the src directory to the path (mirrors the other factory tests)
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
+from graphiti_core.embedder.gemini import GeminiEmbedder
 from graphiti_core.llm_client import OpenAIClient
 from graphiti_core.llm_client.azure_openai_client import AzureOpenAILLMClient
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 
 from config.schema import (
     AzureOpenAIProviderConfig,
+    EmbedderConfig,
+    EmbedderProvidersConfig,
+    GeminiProviderConfig,
     LLMConfig,
     LLMProvidersConfig,
     OpenAIProviderConfig,
 )
 from services.factories import (
+    EmbedderFactory,
     LLMClientFactory,
     is_non_openai_provider,
     reasoning_effort_for_model,
@@ -185,3 +191,33 @@ class TestAzureReasoningEffort:
         client = LLMClientFactory.create(self._config('gpt-4.1'))
         assert isinstance(client, AzureOpenAILLMClient)
         assert client.reasoning is None
+
+
+class TestGeminiEmbedderVertexAI:
+    """The Gemini embedder must forward Vertex AI project/location when configured."""
+
+    @staticmethod
+    def _config() -> EmbedderConfig:
+        return EmbedderConfig(
+            provider='gemini',
+            model='text-embedding-005',
+            dimensions=768,
+            providers=EmbedderProvidersConfig(
+                gemini=GeminiProviderConfig(
+                    api_key='vertex-key', project_id='proj-1', location='global', vertexai=True
+                )
+            ),
+        )
+
+    @patch('google.genai.Client')
+    def test_gemini_embedder_uses_vertex_mode(self, mock_client):
+        embedder = EmbedderFactory.create(self._config())
+
+        assert isinstance(embedder, GeminiEmbedder)
+        assert embedder.config.vertexai is True
+        assert embedder.config.project_id == 'proj-1'
+        assert embedder.config.location == 'global'
+        # The client is built for Vertex AI (vertexai=True) so requests hit aiplatform.
+        mock_client.assert_called_once_with(
+            vertexai=True, project='proj-1', location='global', api_key='vertex-key'
+        )
