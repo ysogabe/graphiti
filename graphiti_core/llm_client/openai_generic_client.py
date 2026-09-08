@@ -176,6 +176,15 @@ class OpenAIGenericClient(LLMClient):
                 # from a stray effort.
                 request_kwargs['reasoning_effort'] = self.reasoning_effort
             response = await self.client.chat.completions.create(**request_kwargs)
+            # Record token usage for cost/scale tracking (b.ai-compatible responses carry
+            # `.usage`). Keyed by model so the tracker can be read per model.
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                self.token_tracker.record(
+                    prompt_name=self.model or DEFAULT_MODEL,
+                    input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                    output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                )
             result = response.choices[0].message.content or ''
             # An empty body (refusal, length finish_reason, or a flaky endpoint) would make
             # json.loads raise a cryptic JSONDecodeError; surface a clear error instead.
