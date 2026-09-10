@@ -1,0 +1,19 @@
+[Unit]
+Description=Graphiti MCP server (b.ai LLM + Vertex embedding + Neo4j)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as the hermes user (the repo/venv are owned by hermes). Secrets live in
+# /etc/graphiti-mcp.env (chmod 600) so nothing is inline in this unit.
+User=hermes
+WorkingDirectory=/home/hermes/work/graphiti/mcp_server
+EnvironmentFile=/etc/graphiti-mcp.env
+Environment=PYTHONPATH=src
+ExecStart=/home/hermes/work/graphiti/.venv/bin/python src/graphiti_mcp_server.py --config config/deploy.yaml --transport http --host 0.0.0.0 --port 8100
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
