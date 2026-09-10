@@ -64,6 +64,7 @@ class OpenAIGenericClient(LLMClient):
         client: typing.Any = None,
         max_tokens: int = 16384,
         structured_output_mode: StructuredOutputMode = 'json_schema',
+        reasoning_effort: str | None = None,
     ):
         """
         Initialize the OpenAIGenericClient with the provided configuration, cache setting, and client.
@@ -79,6 +80,11 @@ class OpenAIGenericClient(LLMClient):
                 that do not support the ``json_schema`` response format (e.g. DeepSeek); in
                 that mode the schema is injected into the prompt instead of being enforced
                 by the API.
+            reasoning_effort (str | None): Reasoning effort forwarded to the endpoint as the
+                chat-completions ``reasoning_effort`` body param (e.g. ``'high'``). Only
+                meaningful for reasoning models that accept it; leave ``None`` for
+                non-reasoning models or to let the backend default. Explicit value wins over
+                ``config.reasoning_effort``.
 
         """
         # removed caching to simplify the `generate_response` override
@@ -93,6 +99,11 @@ class OpenAIGenericClient(LLMClient):
         # Override max_tokens to support higher limits for local models
         self.max_tokens = max_tokens
         self.structured_output_mode: StructuredOutputMode = structured_output_mode
+        # Explicit constructor value wins; otherwise read from config. This keeps the factory
+        # and direct construction both working and stays backward-compatible (default None).
+        self.reasoning_effort = (
+            reasoning_effort if reasoning_effort is not None else config.reasoning_effort
+        )
 
         if client is None:
             self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)
@@ -152,13 +163,28 @@ class OpenAIGenericClient(LLMClient):
             elif m.role == 'system':
                 openai_messages.append({'role': 'system', 'content': m.content})
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model or DEFAULT_MODEL,
-                messages=openai_messages,
-                temperature=self.temperature,
-                max_tokens=max_tokens,
-                response_format=self._build_response_format(response_model),  # type: ignore[arg-type]
-            )
+            request_kwargs: dict[str, typing.Any] = {
+                'model': self.model or DEFAULT_MODEL,
+                'messages': openai_messages,
+                'temperature': self.temperature,
+                'max_tokens': max_tokens,
+                'response_format': self._build_response_format(response_model),  # type: ignore[arg-type]
+            }
+            if self.reasoning_effort:
+                # OpenAI-compatible chat-completions body param. Only sent when configured, so
+                # a non-reasoning model (or one whose backend rejects the value) never 400s
+                # from a stray effort.
+                request_kwargs['reasoning_effort'] = self.reasoning_effort
+            response = await self.client.chat.completions.create(**request_kwargs)
+            # Record token usage for cost/scale tracking (b.ai-compatible responses carry
+            # `.usage`). Keyed by model so the tracker can be read per model.
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                self.token_tracker.record(
+                    prompt_name=self.model or DEFAULT_MODEL,
+                    input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                    output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                )
             result = response.choices[0].message.content or ''
             # An empty body (refusal, length finish_reason, or a flaky endpoint) would make
             # json.loads raise a cryptic JSONDecodeError; surface a clear error instead.

@@ -111,11 +111,18 @@ class AnthropicProviderConfig(BaseModel):
 
 
 class GeminiProviderConfig(BaseModel):
-    """Gemini provider configuration."""
+    """Gemini / Vertex AI provider configuration."""
 
     api_key: str | None = None
     project_id: str | None = None
     location: str = 'us-central1'
+    vertexai: bool = Field(
+        default=False,
+        description=(
+            'Use Vertex AI (aiplatform.googleapis.com) for gemini models instead of the '
+            'Gemini Developer API. Requires project_id + location and a Vertex-bound API key.'
+        ),
+    )
 
 
 class GroqProviderConfig(BaseModel):
@@ -158,6 +165,17 @@ class LLMConfig(BaseModel):
             'Structured output mode for OpenAIGenericClient: json_schema requests native '
             'schema enforcement; json_object injects the schema into the prompt for '
             'OpenAI-compatible providers that do not reliably honor json_schema.'
+        ),
+    )
+    reasoning_effort: str | None = Field(
+        default=None,
+        description=(
+            'Reasoning effort for the extraction LLM, forwarded to OpenAI-compatible '
+            'chat-completions endpoints (e.g. b.ai) as the `reasoning_effort` body param. '
+            'Only set it for reasoning models that accept a value (e.g. `low`/`medium`/`high`); '
+            'leave unset for non-reasoning models or to let the backend default. Supported '
+            'values are provider/model-specific — some b.ai models (e.g. glm-5.3-flash) '
+            'reject unsupported values with a 400.'
         ),
     )
     providers: LLMProvidersConfig = Field(default_factory=LLMProvidersConfig)
@@ -322,6 +340,8 @@ class GraphitiConfig(BaseSettings):
             self.llm.model = args.model
         if hasattr(args, 'temperature') and args.temperature is not None:
             self.llm.temperature = args.temperature
+        if hasattr(args, 'reasoning_effort') and args.reasoning_effort:
+            self.llm.reasoning_effort = args.reasoning_effort
 
         # Override embedder settings
         if hasattr(args, 'embedder_provider') and args.embedder_provider:

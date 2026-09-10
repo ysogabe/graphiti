@@ -157,6 +157,30 @@ async def test_strips_markdown_code_fence_before_parsing():
 
 
 @pytest.mark.asyncio
+async def test_reasoning_effort_is_forwarded_when_configured():
+    # b.ai (OpenAI-compatible chat completions) must receive `reasoning_effort` for the
+    # reasoning models that support it (e.g. gpt-5.6-luna, glm-5.3-flash). This is a
+    # chat-completions body param, distinct from the Responses-API `reasoning={...}` used
+    # by the official OpenAIClient.
+    client, completions = _make_client(reasoning_effort='high')
+
+    await client.generate_response(_messages(), response_model=ResponseModel)
+
+    assert completions.create_calls[0]['reasoning_effort'] == 'high'
+
+
+@pytest.mark.asyncio
+async def test_no_reasoning_effort_is_sent_when_unset():
+    # When effort is not configured, the request must not carry a reasoning_effort key at
+    # all (sending one for a non-reasoning model or one the backend rejects would 400).
+    client, completions = _make_client()
+
+    await client.generate_response(_messages(), response_model=ResponseModel)
+
+    assert 'reasoning_effort' not in completions.create_calls[0]
+
+
+@pytest.mark.asyncio
 async def test_non_retryable_error_is_not_retried():
     # The old hand-rolled re-prompt loop is gone. Retry is now delegated to the base
     # tenacity wrapper, which only retries transient errors (RateLimitError /

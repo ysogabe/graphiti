@@ -42,6 +42,7 @@ class LLMConfig:
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         small_model: str | None = None,
+        reasoning_effort: str | None = None,
     ):
         """
         Initialize the LLMConfig with the provided parameters.
@@ -59,6 +60,10 @@ class LLMConfig:
 
                 small_model (str, optional): The specific LLM model to use for generating responses of simpler prompts.
                                                                 Defaults to "gpt-4.1-nano".
+
+                reasoning_effort (str, optional): Reasoning effort forwarded to OpenAI-compatible
+                                                                chat-completions endpoints (e.g. b.ai). Only set for reasoning
+                                                                models that accept it; None means it is not sent.
         """
         self.base_url = base_url
         self.api_key = api_key
@@ -66,3 +71,4 @@ class LLMConfig:
         self.small_model = small_model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort

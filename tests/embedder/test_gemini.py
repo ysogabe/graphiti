@@ -111,6 +111,39 @@ class TestGeminiEmbedderInitialization:
         assert embedder.config.embedding_model == DEFAULT_EMBEDDING_MODEL
 
 
+    @patch('google.genai.Client')
+    def test_init_vertex_mode_builds_vertexai_client(self, mock_client):
+        """Vertex AI mode must build the client with vertexai=True + project + location.
+
+        google-genai routes aiplatform.googleapis.com requests through the vertexai
+        flag; config.project_id/location are required for the Vertex model path.
+        """
+        config = GeminiEmbedderConfig(
+            api_key='vertex-key',
+            embedding_model='text-embedding-005',
+            embedding_dim=768,
+            vertexai=True,
+            project_id='proj-1',
+            location='global',
+        )
+        embedder = GeminiEmbedder(config=config)
+
+        mock_client.assert_called_once_with(
+            vertexai=True, project='proj-1', location='global', api_key='vertex-key'
+        )
+        assert embedder.config.vertexai is True
+        assert embedder.config.project_id == 'proj-1'
+        assert embedder.config.location == 'global'
+
+    @patch('google.genai.Client')
+    def test_init_default_uses_gemini_dev_api(self, mock_client):
+        """Without vertexai=True the client must use the Gemini Developer API (key only)."""
+        config = GeminiEmbedderConfig(api_key='dev-key', embedding_model='text-embedding-004')
+        GeminiEmbedder(config=config)
+
+        mock_client.assert_called_once_with(api_key='dev-key')
+
+
 class TestGeminiEmbedderCreate:
     """Tests for GeminiEmbedder create method."""
 

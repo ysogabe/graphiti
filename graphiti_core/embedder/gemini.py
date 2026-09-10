@@ -45,6 +45,19 @@ DEFAULT_BATCH_SIZE = 100
 class GeminiEmbedderConfig(EmbedderConfig):
     embedding_model: str = Field(default=DEFAULT_EMBEDDING_MODEL)
     api_key: str | None = None
+    vertexai: bool = Field(
+        default=False,
+        description=(
+            'Use Vertex AI (aiplatform.googleapis.com) instead of the Gemini Developer '
+            'API. Requires project_id + location; a Vertex-bound API key is used for auth.'
+        ),
+    )
+    project_id: str | None = Field(
+        default=None, description='Google Cloud project ID (Vertex AI only)'
+    )
+    location: str | None = Field(
+        default=None, description='Vertex AI location, e.g. global or us-central1 (Vertex AI only)'
+    )
 
 
 class GeminiEmbedder(EmbedderClient):
@@ -72,7 +85,17 @@ class GeminiEmbedder(EmbedderClient):
         self.config = config
 
         if client is None:
-            self.client = genai.Client(api_key=config.api_key)
+            if config.vertexai:
+                # Vertex AI (aiplatform.googleapis.com) requires the project + location and
+                # a Vertex-bound API key; google-genai routes requests there via vertexai=True.
+                self.client = genai.Client(
+                    vertexai=True,
+                    project=config.project_id,
+                    location=config.location,
+                    api_key=config.api_key,
+                )
+            else:
+                self.client = genai.Client(api_key=config.api_key)
         else:
             self.client = client
 

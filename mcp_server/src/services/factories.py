@@ -168,6 +168,7 @@ class LLMClientFactory:
                         config=llm_config,
                         max_tokens=config.max_tokens,
                         structured_output_mode=config.structured_output_mode,
+                        reasoning_effort=config.reasoning_effort,
                     )
                 else:
                     # Use OpenAIClient for official OpenAI API (supports Responses API).
@@ -379,10 +380,21 @@ class EmbedderFactory:
 
                 from graphiti_core.embedder.gemini import GeminiEmbedderConfig
 
+                gemini = config.providers.gemini
+                # Vertex AI prefers the short model name (auto-resolved by google-genai);
+                # the Gemini Developer API uses the 'models/<name>' form.
+                embedding_model = config.model or (
+                    'text-embedding-005'
+                    if gemini.vertexai
+                    else 'models/text-embedding-004'
+                )
                 gemini_config = GeminiEmbedderConfig(
                     api_key=api_key,
-                    embedding_model=config.model or 'models/text-embedding-004',
+                    embedding_model=embedding_model,
                     embedding_dim=config.dimensions or 768,
+                    vertexai=gemini.vertexai,
+                    project_id=gemini.project_id,
+                    location=gemini.location,
                 )
                 return GeminiEmbedder(config=gemini_config)
 

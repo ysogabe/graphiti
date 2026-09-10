@@ -17,6 +17,10 @@ llm:
   # Use json_object for OpenAI-compatible providers that accept json_schema
   # but do not reliably enforce the requested Pydantic schema.
   structured_output_mode: ${LLM_STRUCTURED_OUTPUT_MODE:json_schema}
+  # Reasoning effort for the extraction LLM (e.g. low/medium/high). Only set for
+  # reasoning models that accept a value; forwarded to OpenAI-compatible endpoints
+  # (e.g. b.ai). Leave unset for non-reasoning models.
+  reasoning_effort: ${LLM_REASONING_EFFORT:}
   
   providers:
     openai:
@@ -67,7 +71,10 @@ embedder:
       api_key: ${GOOGLE_API_KEY}
       project_id: ${GOOGLE_PROJECT_ID:}
       location: ${GOOGLE_LOCATION:us-central1}
-      
+      # Set true to route gemini through Vertex AI (aiplatform.googleapis.com).
+      # Requires a Vertex-bound API key + project_id + location (e.g. global).
+      vertexai: ${EMBEDDER_VERTEXAI:false}
+    
     voyage:
       api_key: ${VOYAGE_API_KEY}
       api_url: ${VOYAGE_API_URL:https://api.voyageai.com/v1}
