@@ -1,0 +1,45 @@
+# Graphiti MCP server deployment config (this box, .39)
+# LLM = b.ai glm-5.3-flash (campaign), embedding = Google Vertex AI text-embedding-005,
+# DB = Neo4j (container "neo4j"). Secrets via env. Server default group = shared ledger (minamo).
+server:
+  transport: http
+  host: 0.0.0.0
+  port: 8100
+
+llm:
+  provider: openai
+  model: ${MODEL_NAME:glm-5.3-flash}
+  reasoning_effort: ${LLM_REASONING_EFFORT:high}   # glm rejects medium/off (400)
+  structured_output_mode: ${LLM_STRUCTURED_OUTPUT_MODE:json_object}
+  providers:
+    openai:
+      api_key: ${BAI_API_KEY}
+      api_url: ${BAI_API_URL:https://api.b.ai/v1}
+      organization_id: ${OPENAI_ORGANIZATION_ID:}
+
+embedder:
+  provider: gemini
+  model: ${EMBEDDER_MODEL:text-embedding-005}
+  dimensions: ${EMBEDDER_DIMENSIONS:768}
+  providers:
+    gemini:
+      api_key: ${GOOGLE_API_KEY}
+      project_id: ${GOOGLE_CLOUD_PROJECT:257425471273}
+      location: ${GOOGLE_CLOUD_LOCATION:global}
+      vertexai: ${EMBEDDER_VERTEXAI:true}
+
+database:
+  provider: neo4j
+  providers:
+    neo4j:
+      uri: ${NEO4J_URI:bolt://localhost:7687}
+      username: ${NEO4J_USER:neo4j}
+      password: ${NEO4J_PASSWORD:testpass}
+
+graphiti:
+  # Server-default group. The memory-provider plugin passes an explicit group_id per
+  # request (haruo / minamo), so this only matters for direct clients (Claude Code, Codex)
+  # that omit group_id — they land in the shared ledger (minamo) by default.
+  group_id: ${GRAPHITI_GROUP_ID:minamo}
+  episode_id_prefix: ${EPISODE_ID_PREFIX:}
+  user_id: ${USER_ID:mcp_user}
