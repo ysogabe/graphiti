@@ -1256,6 +1256,26 @@ async def initialize_server() -> ServerConfig:
     if config.server.port:
         mcp.settings.port = config.server.port
 
+    # ⚠️ FastMCP auto-enables localhost-only DNS-rebinding protection at
+    # construction time, when `host` still holds its default of 127.0.0.1.
+    # Later changing `settings.host` does NOT recompute that allowlist, so a
+    # LAN / bridge bind (0.0.0.0) keeps rejecting every non-localhost Host header
+    # with "Invalid Host header". Re-apply the SDK's own rule now that the bind
+    # host is known: protection for localhost binds, disabled otherwise (the same
+    # fallback the SDK itself uses when handed no TransportSecuritySettings).
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    if mcp.settings.host in ('127.0.0.1', 'localhost', '::1'):
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=['127.0.0.1:*', 'localhost:*', '[::1]:*'],
+            allowed_origins=['http://127.0.0.1:*', 'http://localhost:*', 'http://[::1]:*'],
+        )
+    else:
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
+
     # Return MCP configuration for transport
     return config.server
 
