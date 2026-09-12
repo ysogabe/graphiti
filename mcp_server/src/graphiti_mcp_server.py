@@ -634,22 +634,32 @@ async def search_facts_semantic(
     query: str,
     group_ids: str | list[str] | None = None,
     max_facts: int = 5,
-    sim_min_score: float = 0.72,
+    sim_min_score: float = 0.86,
     include_invalidated: bool = False,
 ) -> FactSearchResponse | ErrorResponse:
     """Search facts with the embedding (cosine) leg ONLY, above a similarity floor.
 
     The hybrid path fuses this leg with BM25 and ranks by RRF, so "semantically close facts,
-    or nothing at all" is not expressible through search_memory_facts. Measured on this
-    ledger with the production embedder: unrelated text saturates at ~0.655 cosine, so a
-    floor of 0.70-0.75 returns nothing for it while still recovering cross-lingual matches
-    (a Japanese question finding an English fact) that lexical search cannot reach.
+    or nothing at all" is not expressible through search_memory_facts.
+
+    NOTE on units: sim_min_score follows the graph's normalized cosine scale — the one
+    ``vector.similarity.cosine`` returns on Neo4j and ``(2 - cosineDistance) / 2`` returns on
+    FalkorDB — where 0.5 is orthogonal and 1.0 identical (i.e. (1 + cos) / 2). Verified on
+    this deployment with a synthetic check: cosine([1,0],[0,1]) = 0.5, ([1,0],[1,0]) = 1.0,
+    ([1,0],[-1,0]) = 0.0.
+
+    Measured on this ledger with the production embedder (text-embedding-005, 768d):
+    unrelated text saturates around 0.83 in that scale (true cosine ~0.66), answerable
+    queries reach 0.90-0.96. A 0.86 floor therefore returns nothing for unrelated questions
+    while keeping cross-lingual matches (a Japanese question finding an English fact) that
+    lexical search cannot reach. The historical default of 0.6 sat below the baseline, so no
+    floor was effectively applied at all.
 
     Args:
         query: The search query
         group_ids: Optional group ID or list of group IDs to filter results
         max_facts: Maximum number of facts to return (default 5)
-        sim_min_score: Cosine floor for the leg (default 0.72)
+        sim_min_score: Normalized-cosine floor for the leg (default 0.86)
         include_invalidated: Also return superseded facts (default false)
     """
     global graphiti_service
