@@ -630,6 +630,81 @@ async def export_facts(
 
 
 @mcp.tool()
+async def search_facts_semantic(
+    query: str,
+    group_ids: str | list[str] | None = None,
+    max_facts: int = 5,
+    sim_min_score: float = 0.72,
+    include_invalidated: bool = False,
+) -> FactSearchResponse | ErrorResponse:
+    """Search facts with the embedding (cosine) leg ONLY, above a similarity floor.
+
+    The hybrid path fuses this leg with BM25 and ranks by RRF, so "semantically close facts,
+    or nothing at all" is not expressible through search_memory_facts. Measured on this
+    ledger with the production embedder: unrelated text saturates at ~0.655 cosine, so a
+    floor of 0.70-0.75 returns nothing for it while still recovering cross-lingual matches
+    (a Japanese question finding an English fact) that lexical search cannot reach.
+
+    Args:
+        query: The search query
+        group_ids: Optional group ID or list of group IDs to filter results
+        max_facts: Maximum number of facts to return (default 5)
+        sim_min_score: Cosine floor for the leg (default 0.72)
+        include_invalidated: Also return superseded facts (default false)
+    """
+    global graphiti_service
+
+    if graphiti_service is None:
+        return ErrorResponse(error='Graphiti service not initialized')
+
+    try:
+        if max_facts <= 0:
+            return ErrorResponse(error='max_facts must be a positive integer')
+
+        from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
+        from graphiti_core.search.search_config import EdgeSearchMethod
+
+        client = await graphiti_service.get_client()
+        effective_group_ids = coerce_group_ids(group_ids)
+        if effective_group_ids is None:
+            effective_group_ids = [config.graphiti.group_id] if config.graphiti.group_id else []
+
+        search_config = EDGE_HYBRID_SEARCH_RRF.model_copy(deep=True)
+        search_config.limit = max_facts
+        if search_config.edge_config is not None:
+            search_config.edge_config.search_methods = [EdgeSearchMethod.cosine_similarity]
+            search_config.edge_config.sim_min_score = max(0.0, float(sim_min_score))
+
+        results = await client.search_(
+            query=query, config=search_config, group_ids=effective_group_ids
+        )
+        edges, scores = results.edges, results.edge_reranker_scores
+        pairs = list(zip(edges, scores if len(scores) == len(edges) else [None] * len(edges)))
+
+        if os.environ.get('GRAPHITI_SEARCH_DEBUG') == '1':
+            logger.info(
+                '[search_facts_semantic] query=%r groups=%s floor=%s edges=%s',
+                query, effective_group_ids, sim_min_score, len(pairs),
+            )
+
+        if not include_invalidated:
+            pairs = [(e, s) for e, s in pairs if getattr(e, 'invalid_at', None) is None]
+        if not pairs:
+            return FactSearchResponse(message='No relevant facts found', facts=[])
+
+        facts = []
+        for edge, score in pairs:
+            item = format_fact_result(edge)
+            item['score'] = round(float(score), 4) if score is not None else None
+            facts.append(item)
+        return FactSearchResponse(message='Facts retrieved successfully', facts=facts)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f'Error searching facts (semantic): {error_msg}')
+        return ErrorResponse(error=f'Error searching facts (semantic): {error_msg}')
+
+
+@mcp.tool()
 async def search_memory_facts(
     query: str,
     group_ids: str | list[str] | None = None,
