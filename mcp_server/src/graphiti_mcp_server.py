@@ -94,6 +94,9 @@ else:
 # DEFAULT: 10 (suitable for OpenAI Tier 3, mid-tier Anthropic)
 SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 10))
 
+# Hard cap for export_facts: the page is materialised in memory before it is serialised.
+MAX_EXPORT_FACTS = int(os.getenv('MAX_EXPORT_FACTS', 20000))
+
 
 # Configure structured logging with timestamps
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -593,7 +596,9 @@ async def export_facts(
     Args:
         group_ids: Optional group ID or list of group IDs to restrict the export.
         include_invalidated: Include superseded facts (invalid_at set). Default false.
-        limit: Maximum number of facts to return (default 5000).
+        limit: Maximum number of facts to return (default 5000, hard cap 20000). The whole
+            page is materialised in memory, so an unbounded value would be a cheap way to
+            make the server allocate.
     """
     global graphiti_service
 
@@ -603,6 +608,8 @@ async def export_facts(
     try:
         if limit <= 0:
             return ErrorResponse(error='limit must be a positive integer')
+        if limit > MAX_EXPORT_FACTS:
+            return ErrorResponse(error=f'limit must be <= {MAX_EXPORT_FACTS} (got {limit})')
 
         client = await graphiti_service.get_client()
         groups = coerce_group_ids(group_ids)
@@ -809,7 +816,11 @@ async def search_memory_facts(
         search_config = (
             EDGE_HYBRID_SEARCH_NODE_DISTANCE if center_node_uuid is not None else EDGE_HYBRID_SEARCH_RRF
         ).model_copy(deep=True)
-        search_config.limit = max_facts
+        # Superseded facts are dropped *after* the search, so ask for a wider page: with
+        # max_facts as the Cypher LIMIT, a top-k consisting of invalidated facts would starve
+        # the result (this ledger keeps ~76 of them). Over-fetch, filter, then truncate.
+        slack = 0 if include_invalidated else min(20, max(5, max_facts))
+        search_config.limit = max_facts + slack
         search_config.reranker_min_score = max(0.0, float(min_score))
         if sim_min_score is not None and search_config.edge_config is not None:
             search_config.edge_config.sim_min_score = max(0.0, float(sim_min_score))
@@ -861,6 +872,7 @@ async def search_memory_facts(
         # was still being injected into agent context. Skip them unless asked to audit.
         if not include_invalidated:
             pairs = [(edge, score) for edge, score in pairs if getattr(edge, 'invalid_at', None) is None]
+        pairs = pairs[:max_facts]
 
         if not pairs:
             return FactSearchResponse(message='No relevant facts found', facts=[])

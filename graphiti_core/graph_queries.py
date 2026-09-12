@@ -27,6 +27,14 @@ INDEX_TO_LABEL_KUZU_MAPPING = {
 }
 
 
+# Analyzers shipped with Neo4j that are safe to interpolate into DDL. 'japanese' is
+# Enterprise-only; 'cjk' (character bigrams) is what Community can do for Japanese text.
+_ALLOWED_FULLTEXT_ANALYZERS = frozenset(
+    {'cjk', 'standard', 'english', 'simple', 'whitespace', 'keyword', 'japanese', 'chinese', 'korean'}
+)
+_DEFAULT_FULLTEXT_ANALYZER = 'cjk'
+
+
 def get_range_indices(provider: GraphProvider) -> list[LiteralString]:
     if provider == GraphProvider.FALKORDB:
         return [
@@ -139,7 +147,12 @@ def get_fulltext_indices(
     # ASCII terms and genuine Japanese matches keep their results. Override or disable with
     # GRAPHITI_FULLTEXT_ANALYZER (empty string = keep the server default).
     if analyzer is None:
-        analyzer = os.environ.get('GRAPHITI_FULLTEXT_ANALYZER', 'cjk')
+        analyzer = os.environ.get('GRAPHITI_FULLTEXT_ANALYZER', _DEFAULT_FULLTEXT_ANALYZER)
+    # The analyzer name is interpolated into a Cypher DDL string, so accept only analyzers
+    # that ship with Neo4j rather than passing an environment value through verbatim. An empty
+    # string stays empty on purpose: it means "keep the server default" (no OPTIONS clause).
+    if analyzer and analyzer not in _ALLOWED_FULLTEXT_ANALYZERS:
+        analyzer = _DEFAULT_FULLTEXT_ANALYZER
     opts = (
         f" OPTIONS {{indexConfig: {{`fulltext.analyzer`: '{analyzer}'}}}}" if analyzer else ''
     )
