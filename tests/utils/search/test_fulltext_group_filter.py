@@ -23,6 +23,21 @@ def test_legacy_fulltext_query_without_groups():
     assert fulltext_query('NetAlertX', None, FAKE_DRIVER) == '(\\Net\\AlertX)'
 
 
+def test_neo4j_fulltext_indices_request_the_cjk_analyzer():
+    from graphiti_core.graph_queries import get_fulltext_indices
+
+    stmts = get_fulltext_indices(GraphProvider.NEO4J)
+    assert len(stmts) == 4
+    assert all("`fulltext.analyzer`: 'cjk'" in s for s in stmts)
+
+
+def test_neo4j_fulltext_indices_analyzer_can_be_disabled():
+    from graphiti_core.graph_queries import get_fulltext_indices
+
+    stmts = get_fulltext_indices(GraphProvider.NEO4J, analyzer='')
+    assert all('OPTIONS' not in s for s in stmts)
+
+
 def test_group_filter_is_parenthesised_before_the_query():
     """`a OR b AND (query)` must not leak into Lucene: without the parens the first group
     matches unconditionally and the leg returns query-independent facts."""
