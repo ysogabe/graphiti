@@ -33,6 +33,11 @@ class FactSearchResponse(TypedDict):
     facts: list[dict[str, Any]]
 
 
+class FactExportResponse(TypedDict):
+    message: str
+    facts: list[dict[str, Any]]
+
+
 class EpisodeSearchResponse(TypedDict):
     message: str
     episodes: list[dict[str, Any]]

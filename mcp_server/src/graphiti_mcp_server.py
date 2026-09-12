@@ -30,6 +30,7 @@ from models.response_types import (
     EpisodeEntitiesResponse,
     EpisodeSearchResponse,
     ErrorResponse,
+    FactExportResponse,
     FactSearchResponse,
     NodeSearchResponse,
     SagaSummaryResponse,
@@ -573,6 +574,59 @@ async def search_nodes(
         error_msg = str(e)
         logger.error(f'Error searching nodes: {error_msg}')
         return ErrorResponse(error=f'Error searching nodes: {error_msg}')
+
+
+@mcp.tool()
+async def export_facts(
+    group_ids: str | list[str] | None = None,
+    include_invalidated: bool = False,
+    limit: int = 5000,
+) -> FactExportResponse | ErrorResponse:
+    """Bulk-export facts (entity edges) for building a local index or mirror.
+
+    Unlike search_memory_facts this does no ranking — it walks the graph and returns the
+    current facts, so a client can build its own retrieval index (e.g. a local SQLite FTS5
+    table) without holding Neo4j credentials.
+
+    Args:
+        group_ids: Optional group ID or list of group IDs to restrict the export.
+        include_invalidated: Include superseded facts (invalid_at set). Default false.
+        limit: Maximum number of facts to return (default 5000).
+    """
+    global graphiti_service
+
+    if graphiti_service is None:
+        return ErrorResponse(error='Graphiti service not initialized')
+
+    try:
+        if limit <= 0:
+            return ErrorResponse(error='limit must be a positive integer')
+
+        client = await graphiti_service.get_client()
+        groups = coerce_group_ids(group_ids)
+        if groups is None:
+            groups = [config.graphiti.group_id] if config.graphiti.group_id else []
+
+        cypher = (
+            'MATCH ()-[e:RELATES_TO]->()'
+            + (' WHERE e.group_id IN $group_ids' if groups else '')
+            + (' AND ' if groups else ' WHERE ')
+            + ('e.invalid_at IS NULL' if not include_invalidated else 'true')
+            + ' RETURN e.uuid AS uuid, e.group_id AS group_id, e.name AS name, e.fact AS fact,'
+            ' toString(e.created_at) AS created_at, toString(e.invalid_at) AS invalid_at'
+            ' LIMIT $limit'
+        )
+        records, _, _ = await client.driver.execute_query(
+            cypher, group_ids=groups, limit=int(limit), routing_='r'
+        )
+        facts = [dict(r) for r in records]
+        logger.info('[export_facts] groups=%s include_invalidated=%s -> %d facts',
+                    groups, include_invalidated, len(facts))
+        return FactExportResponse(message='Facts exported successfully', facts=facts)
+    except Exception as e:  # noqa: BLE001
+        error_msg = str(e)
+        logger.error(f'Error exporting facts: {error_msg}')
+        return ErrorResponse(error=f'Error exporting facts: {error_msg}')
 
 
 @mcp.tool()
