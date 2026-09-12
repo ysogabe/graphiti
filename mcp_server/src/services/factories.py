@@ -1,12 +1,14 @@
 """Factory classes for creating LLM, Embedder, and Database clients."""
 
+import os
+
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 from graphiti_core.embedder import EmbedderClient, OpenAIEmbedder
 from graphiti_core.llm_client import LLMClient, OpenAIClient
 from graphiti_core.llm_client.config import LLMConfig as GraphitiLLMConfig
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 
-from config.schema import DatabaseConfig, EmbedderConfig, LLMConfig
+from config.schema import DatabaseConfig, EmbedderConfig, LLMConfig, RerankerConfig
 
 # Try to import FalkorDriver if available
 try:
@@ -431,11 +433,38 @@ class CrossEncoderFactory:
     """
 
     @staticmethod
-    def create(llm_config: LLMConfig, embedder_config: EmbedderConfig) -> CrossEncoderClient:
-        """Create a cross-encoder client based on the configured providers."""
+    def create(
+        llm_config: LLMConfig,
+        embedder_config: EmbedderConfig,
+        reranker_config: RerankerConfig | None = None,
+    ) -> CrossEncoderClient:
+        """Create a cross-encoder client based on configuration.
+
+        An explicit ``reranker.provider`` wins over the provider probe: on an
+        OpenAI-compatible endpoint the probe would pick OpenAIRerankerClient, which needs
+        OpenAI's logprobs/logit_bias and is rejected there (measured 400 on b.ai), while the
+        Gemini client scores passages 0-100 and works over Vertex with the embedder's key.
+        """
         import logging
 
         logger = logging.getLogger(__name__)
+        explicit = (getattr(reranker_config, 'provider', None) or 'auto').lower()
+        model = getattr(reranker_config, 'model', None) or None
+
+        if explicit == 'gemini':
+            return CrossEncoderFactory._gemini_reranker(embedder_config, model, logger)
+        if explicit == 'openai':
+            openai_cfg = llm_config.providers.openai
+            if not openai_cfg:
+                raise ValueError('reranker.provider=openai but llm.providers.openai is not configured')
+            from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
+
+            logger.info('Using OpenAIRerankerClient (explicit reranker.provider=openai)')
+            return OpenAIRerankerClient(
+                config=GraphitiLLMConfig(
+                    api_key=openai_cfg.api_key, base_url=openai_cfg.api_url, model=model
+                )
+            )
 
         # Try the LLM provider first, then the embedder, before falling back to a local model.
         for source, config in (('LLM', llm_config), ('embedder', embedder_config)):
@@ -462,6 +491,32 @@ class CrossEncoderFactory:
             ) from e
 
         return BGERerankerClient()
+
+    @staticmethod
+    def _gemini_reranker(
+        embedder_config: EmbedderConfig, model: str | None, logger
+    ) -> CrossEncoderClient:
+        """Gemini reranker client, routed through Vertex when the embedder uses Vertex.
+
+        The stock client constructs genai.Client(api_key=...) only, which talks to the Gemini
+        Developer API — a Vertex-bound key is rejected there (measured 401 UNAUTHENTICATED).
+        """
+        from google import genai
+        from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
+
+        gem = getattr(getattr(embedder_config, 'providers', None), 'gemini', None)
+        api_key = (getattr(gem, 'api_key', None) if gem else None) or os.environ.get('GOOGLE_API_KEY')
+        config = GraphitiLLMConfig(api_key=api_key, model=model)
+        if gem is not None and getattr(gem, 'vertexai', False):
+            project = getattr(gem, 'project_id', None) or os.environ.get('GOOGLE_CLOUD_PROJECT')
+            location = getattr(gem, 'location', None) or os.environ.get('GOOGLE_CLOUD_LOCATION') or 'global'
+            logger.info('Using GeminiRerankerClient over Vertex (project=%s, location=%s)', project, location)
+            return GeminiRerankerClient(
+                config=config,
+                client=genai.Client(vertexai=True, project=project, location=location, api_key=api_key),
+            )
+        logger.info('Using GeminiRerankerClient (Gemini Developer API)')
+        return GeminiRerankerClient(config=config)
 
     @staticmethod
     def _reranker_for_provider(

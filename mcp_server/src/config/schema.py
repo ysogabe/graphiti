@@ -273,6 +273,32 @@ class EdgeTypeMapEntry(BaseModel):
     )
 
 
+class RerankerConfig(BaseModel):
+    """Cross-encoder reranker configuration.
+
+    The automatic probe in CrossEncoderFactory prefers the LLM provider, which on an
+    OpenAI-compatible endpoint (b.ai/glm) yields OpenAIRerankerClient — that one needs OpenAI's
+    logprobs/logit_bias/token ids and is rejected there (measured: HTTP 400 "max_tokens must be
+    greater than 2"). An explicit provider here wins over the probe.
+    """
+
+    provider: str = Field(
+        default='auto',
+        description="auto | gemini | openai | azure_openai | none (auto = probe, see factory)",
+    )
+    model: str | None = Field(
+        default=None,
+        description='Reranker model (defaults to the client default, e.g. gemini-2.5-flash-lite)',
+    )
+    min_score: float = Field(
+        default=0.5,
+        description=(
+            'Reranker score floor (0-1, meaningful absolute values unlike the RRF rank ladder). '
+            'Measured on this ledger: unrelated queries score everything 0.0, relevant ones 0.5-0.85'
+        ),
+    )
+
+
 class GraphitiAppConfig(BaseModel):
     """Graphiti-specific configuration."""
 
@@ -295,6 +321,7 @@ class GraphitiConfig(BaseSettings):
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
+    reranker: RerankerConfig = Field(default_factory=RerankerConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     graphiti: GraphitiAppConfig = Field(default_factory=GraphitiAppConfig)
 

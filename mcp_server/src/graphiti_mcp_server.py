@@ -222,7 +222,9 @@ class GraphitiService:
             # Create cross-encoder (reranker) client. Without this, Graphiti defaults to
             # OpenAIRerankerClient, which needs an OpenAI API key even on non-OpenAI setups.
             # Reranker setup errors must remain fatal rather than silently restoring that default.
-            cross_encoder_client = CrossEncoderFactory.create(self.config.llm, self.config.embedder)
+            cross_encoder_client = CrossEncoderFactory.create(
+                self.config.llm, self.config.embedder, self.config.reranker
+            )
 
             # Get database configuration
             db_config = DatabaseDriverFactory.create_config(self.config.database)
@@ -727,6 +729,7 @@ async def search_memory_facts(
     invalid_at_before: str | None = None,
     min_score: float = 0.0,
     sim_min_score: float | None = None,
+    reranker: str | None = None,
     include_invalidated: bool = False,
 ) -> FactSearchResponse | ErrorResponse:
     """Search the graph memory for relevant facts (entity edges).
@@ -751,8 +754,13 @@ async def search_memory_facts(
             ~1.0 is "rank 1 in one list", ~2.0 is "rank 1 in both", ~0.33 is "rank 3".
             Only the RRF path (no center_node_uuid) produces comparable scores; with a
             center node each fact's ``score`` is reported as null.
-        sim_min_score: Optional cosine-similarity floor for the embedding search leg
-            (default 0.6). Raise it to keep weakly-related neighbours out of the fusion.
+        sim_min_score: Optional cosine-similarity floor for the embedding search leg. The
+            scale is the graph's normalized cosine, (1 + cos) / 2 — unrelated text measured
+            ~0.83 there, answerable queries 0.87-0.96, so ~0.86 is a working floor.
+        reranker: Optional reranker override: 'rrf' (default), 'cross_encoder', 'mmr',
+            'node_distance', 'episode_mentions'. 'cross_encoder' scores each candidate against
+            the query directly (measured: 0.0 for unrelated, 0.5-0.85 for relevant) and is the
+            only mode where min_score is a meaningful absolute floor.
         include_invalidated: Set true to also return superseded facts (those with an
             ``invalid_at``). Default false — a fact that has been contradicted stays in the
             graph, so returning it as current would feed stale knowledge to the caller.
@@ -806,6 +814,24 @@ async def search_memory_facts(
         if sim_min_score is not None and search_config.edge_config is not None:
             search_config.edge_config.sim_min_score = max(0.0, float(sim_min_score))
 
+        # Optional reranker override. The cross-encoder scores (query, fact) pairs directly, so
+        # with min_score it can answer "nothing here is relevant" — which the RRF rank ladder
+        # (1.0/0.5/0.333...) cannot express. Named so a caller does not have to know recipes.
+        if reranker and search_config.edge_config is not None:
+            from graphiti_core.search.search_config import EdgeReranker
+
+            modes = {
+                'rrf': EdgeReranker.rrf,
+                'mmr': EdgeReranker.mmr,
+                'cross_encoder': EdgeReranker.cross_encoder,
+                'node_distance': EdgeReranker.node_distance,
+                'episode_mentions': EdgeReranker.episode_mentions,
+            }
+            key = reranker.strip().lower()
+            if key not in modes:
+                return ErrorResponse(error=f'Unknown reranker {reranker!r}; use one of {sorted(modes)}')
+            search_config.edge_config.reranker = modes[key]
+
         results = await client.search_(
             query=query,
             config=search_config,
@@ -818,8 +844,8 @@ async def search_memory_facts(
         if os.environ.get('GRAPHITI_SEARCH_DEBUG') == '1':
             logger.info(
                 '[search_memory_facts] query=%r groups=%s max_facts=%s min_score=%s '
-                'sim_min_score=%s include_invalidated=%s edges=%s',
-                query, effective_group_ids, max_facts, min_score, sim_min_score,
+                'sim_min_score=%s reranker=%s include_invalidated=%s edges=%s',
+                query, effective_group_ids, max_facts, min_score, sim_min_score, reranker,
                 include_invalidated, len(relevant_edges),
             )
 

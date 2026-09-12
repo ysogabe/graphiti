@@ -28,6 +28,16 @@ embedder:
       location: ${GOOGLE_CLOUD_LOCATION:global}
       vertexai: ${EMBEDDER_VERTEXAI:true}
 
+reranker:
+  # The provider probe would take the LLM provider first, i.e. OpenAIRerankerClient against
+  # b.ai — that one relies on OpenAI's logprobs/logit_bias and is rejected there (measured:
+  # HTTP 400 "max_tokens must be greater than 2"). The Gemini client scores each passage 0-100
+  # instead and runs over the same Vertex route as the embedder (measured: 0.0 for unrelated
+  # queries, 0.5-0.85 for relevant ones, +0.8s per search).
+  provider: ${RERANKER_PROVIDER:gemini}
+  model: ${RERANKER_MODEL:gemini-2.5-flash-lite}
+  min_score: ${RERANKER_MIN_SCORE:0.5}
+
 database:
   provider: neo4j
   providers:
