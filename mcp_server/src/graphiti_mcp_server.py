@@ -586,6 +586,8 @@ async def search_memory_facts(
     valid_at_before: str | None = None,
     invalid_at_after: str | None = None,
     invalid_at_before: str | None = None,
+    min_score: float = 0.0,
+    sim_min_score: float | None = None,
 ) -> FactSearchResponse | ErrorResponse:
     """Search the graph memory for relevant facts (entity edges).
 
@@ -593,7 +595,8 @@ async def search_memory_facts(
         query: The search query
         group_ids: Optional group ID, or list of group IDs, to filter results (a single
             string is accepted and treated as a one-element list)
-        max_facts: Maximum number of facts to return (default: 10)
+        max_facts: Maximum number of facts to return (default: 10). This is an upper
+            bound, not a target: with a min_score floor the response may be shorter.
         center_node_uuid: Optional UUID of a node to center the search around
         edge_types: Optional list of edge (fact) type names to filter by
         valid_at_after: Optional ISO-8601 lower bound; only facts whose valid_at is at or
@@ -601,6 +604,15 @@ async def search_memory_facts(
         valid_at_before: Optional ISO-8601 upper bound on a fact's valid_at
         invalid_at_after: Optional ISO-8601 lower bound on a fact's invalid_at
         invalid_at_before: Optional ISO-8601 upper bound on a fact's invalid_at
+        min_score: Relevance floor on the fused (RRF) score; facts below it are dropped,
+            so a query with no genuinely relevant knowledge returns fewer facts (or none)
+            instead of a full page of loose neighbours. 0.0 keeps every candidate (the
+            historical behaviour). RRF sums 1/(rank+1) across the BM25 and cosine lists:
+            ~1.0 is "rank 1 in one list", ~2.0 is "rank 1 in both", ~0.33 is "rank 3".
+            Only the RRF path (no center_node_uuid) produces comparable scores; with a
+            center node each fact's ``score`` is reported as null.
+        sim_min_score: Optional cosine-similarity floor for the embedding search leg
+            (default 0.6). Raise it to keep weakly-related neighbours out of the fusion.
     """
     global graphiti_service
 
@@ -636,18 +648,44 @@ async def search_memory_facts(
             else []
         )
 
-        relevant_edges = await client.search(
-            group_ids=effective_group_ids,
+        # Score thresholds: min_score floors the fused (RRF) score, sim_min_score the
+        # cosine leg. A deep copy so the shared module-level recipe is never mutated.
+        from graphiti_core.search.search_config_recipes import (
+            EDGE_HYBRID_SEARCH_NODE_DISTANCE,
+            EDGE_HYBRID_SEARCH_RRF,
+        )
+
+        search_config = (
+            EDGE_HYBRID_SEARCH_NODE_DISTANCE if center_node_uuid is not None else EDGE_HYBRID_SEARCH_RRF
+        ).model_copy(deep=True)
+        search_config.limit = max_facts
+        search_config.reranker_min_score = max(0.0, float(min_score))
+        if sim_min_score is not None and search_config.edge_config is not None:
+            search_config.edge_config.sim_min_score = max(0.0, float(sim_min_score))
+
+        results = await client.search_(
             query=query,
-            num_results=max_facts,
+            config=search_config,
+            group_ids=effective_group_ids,
             center_node_uuid=center_node_uuid,
             search_filter=search_filter,
         )
+        relevant_edges, scores = results.edges, results.edge_reranker_scores
+
+        # The fused scores are edge-level only for the RRF path. With a center node the
+        # node-distance reranker scores NODES while each node's edges are expanded into
+        # separate results, so the two lists stop corresponding 1:1 — report no score
+        # there instead of attaching a neighbour's number to a fact.
+        scores_align = center_node_uuid is None and len(scores) == len(relevant_edges)
 
         if not relevant_edges:
             return FactSearchResponse(message='No relevant facts found', facts=[])
 
-        facts = [format_fact_result(edge) for edge in relevant_edges]
+        facts = []
+        for index, edge in enumerate(relevant_edges):
+            item = format_fact_result(edge)
+            item['score'] = round(float(scores[index]), 4) if scores_align else None
+            facts.append(item)
         return FactSearchResponse(message='Facts retrieved successfully', facts=facts)
     except Exception as e:
         error_msg = str(e)
