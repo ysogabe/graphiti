@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import logging
+import os
 from collections import defaultdict
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -67,6 +68,9 @@ from graphiti_core.search.search_utils import (
 from graphiti_core.tracer import NoOpTracer, Tracer
 
 logger = logging.getLogger(__name__)
+# Opt-in per-leg diagnostics: GRAPHITI_SEARCH_DEBUG=1 makes the search pipeline log what
+# each retrieval leg returned. Off by default (the service logs at INFO).
+_SEARCH_DEBUG = os.environ.get('GRAPHITI_SEARCH_DEBUG') == '1'
 
 
 def _enum_value(value: Any) -> Any:
@@ -322,6 +326,12 @@ async def edge_search(
                 },
             ) as method_span:
                 search_results = list(await semaphore_gather(*search_tasks))
+                if _SEARCH_DEBUG:
+                    logger.info(
+                        '[edge_search] query=%r groups=%s legs=%s limit=%s min_score=%s center=%s',
+                        query, group_ids, [len(r) for r in search_results], limit,
+                        reranker_min_score, center_node_uuid,
+                    )
                 method_span.add_attributes(
                     {
                         'result_set_count': len(search_results),

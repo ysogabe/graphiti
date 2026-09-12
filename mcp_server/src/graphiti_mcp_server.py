@@ -676,6 +676,14 @@ async def search_memory_facts(
         )
         relevant_edges, scores = results.edges, results.edge_reranker_scores
 
+        if os.environ.get('GRAPHITI_SEARCH_DEBUG') == '1':
+            logger.info(
+                '[search_memory_facts] query=%r groups=%s max_facts=%s min_score=%s '
+                'sim_min_score=%s include_invalidated=%s edges=%s',
+                query, effective_group_ids, max_facts, min_score, sim_min_score,
+                include_invalidated, len(relevant_edges),
+            )
+
         # The fused scores are edge-level only for the RRF path. With a center node the
         # node-distance reranker scores NODES while each node's edges are expanded into
         # separate results, so the two lists stop corresponding 1:1 — report no score

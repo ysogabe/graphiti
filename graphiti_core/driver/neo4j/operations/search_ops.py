@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import logging
+import os
 from typing import Any
 
 from graphiti_core.driver.driver import GraphProvider
@@ -40,6 +41,11 @@ from graphiti_core.models.nodes.node_db_queries import (
     get_entity_node_return_query,
 )
 from graphiti_core.nodes import CommunityNode, EntityNode, EpisodicNode
+
+logger = logging.getLogger(__name__)
+# GRAPHITI_SEARCH_DEBUG=1 logs what the fulltext leg actually sends and how many rows
+# come back — the quickest way to tell a query-building bug from a pipeline one.
+_SEARCH_DEBUG = os.environ.get('GRAPHITI_SEARCH_DEBUG') == '1'
 from graphiti_core.search.search_filters import (
     SearchFilters,
     edge_search_filter_query_constructor,
@@ -282,6 +288,9 @@ class Neo4jSearchOperations(SearchOperations):
             routing_='r',
             **filter_params,
         )
+
+        if _SEARCH_DEBUG:
+            logger.info('[edge_ft] lucene=%r rows=%s', fuzzy_query, len(records))
 
         return [entity_edge_from_record(r) for r in records]
 
