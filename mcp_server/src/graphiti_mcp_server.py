@@ -588,6 +588,7 @@ async def search_memory_facts(
     invalid_at_before: str | None = None,
     min_score: float = 0.0,
     sim_min_score: float | None = None,
+    include_invalidated: bool = False,
 ) -> FactSearchResponse | ErrorResponse:
     """Search the graph memory for relevant facts (entity edges).
 
@@ -613,6 +614,9 @@ async def search_memory_facts(
             center node each fact's ``score`` is reported as null.
         sim_min_score: Optional cosine-similarity floor for the embedding search leg
             (default 0.6). Raise it to keep weakly-related neighbours out of the fusion.
+        include_invalidated: Set true to also return superseded facts (those with an
+            ``invalid_at``). Default false — a fact that has been contradicted stays in the
+            graph, so returning it as current would feed stale knowledge to the caller.
     """
     global graphiti_service
 
@@ -677,14 +681,21 @@ async def search_memory_facts(
         # separate results, so the two lists stop corresponding 1:1 — report no score
         # there instead of attaching a neighbour's number to a fact.
         scores_align = center_node_uuid is None and len(scores) == len(relevant_edges)
+        pairs = list(zip(relevant_edges, scores if scores_align else [None] * len(relevant_edges)))
 
-        if not relevant_edges:
+        # Superseded facts (invalid_at set) stay in the graph and would otherwise be served
+        # as current — measured: "graphiti-mcp runs on .39" survived the LXC migration and
+        # was still being injected into agent context. Skip them unless asked to audit.
+        if not include_invalidated:
+            pairs = [(edge, score) for edge, score in pairs if getattr(edge, 'invalid_at', None) is None]
+
+        if not pairs:
             return FactSearchResponse(message='No relevant facts found', facts=[])
 
         facts = []
-        for index, edge in enumerate(relevant_edges):
+        for edge, score in pairs:
             item = format_fact_result(edge)
-            item['score'] = round(float(scores[index]), 4) if scores_align else None
+            item['score'] = round(float(score), 4) if score is not None else None
             facts.append(item)
         return FactSearchResponse(message='Facts retrieved successfully', facts=facts)
     except Exception as e:
