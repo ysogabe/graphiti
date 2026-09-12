@@ -101,16 +101,19 @@ def fulltext_query(query: str, group_ids: list[str] | None, driver: GraphDriver)
     for f in group_ids_filter_list:
         group_ids_filter += f if not group_ids_filter else f' OR {f}'
 
-    group_ids_filter += ' AND ' if group_ids_filter else ''
-
     lucene_query = lucene_sanitize(query)
     # If the lucene query is too long return no query
     if len(lucene_query.split(' ')) + len(group_ids or '') >= MAX_QUERY_LENGTH:
         return ''
 
-    full_query = group_ids_filter + '(' + lucene_query + ')'
-
-    return full_query
+    # Parenthesise the group filter — see the same fix in
+    # driver/neo4j/operations/search_ops.py. Emitting
+    # `group_id:"a" OR group_id:"b" AND (query)` lets the first group match
+    # unconditionally (AND binds tighter), so the keyword leg returns facts that have
+    # nothing to do with the query.
+    if group_ids_filter:
+        return f'({group_ids_filter}) AND ({lucene_query})'
+    return f'({lucene_query})'
 
 
 async def get_episodes_by_mentions(

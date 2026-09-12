@@ -1,6 +1,26 @@
-"""Unit tests for the Neo4j fulltext query builder's group filter."""
+"""Unit tests for the group filter in both fulltext query builders.
 
+Two code paths build the same Lucene string: the driver-ops builder used when
+``driver.search_interface`` is wired, and ``search_utils.fulltext_query`` used otherwise
+(Neo4j goes down the second one). Both must parenthesise the group filter."""
+
+from types import SimpleNamespace
+
+from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.neo4j.operations.search_ops import _build_neo4j_fulltext_query
+from graphiti_core.search.search_utils import fulltext_query
+
+FAKE_DRIVER = SimpleNamespace(provider=GraphProvider.NEO4J, fulltext_syntax='')
+
+
+def test_legacy_fulltext_query_parenthesises_the_group_filter():
+    assert fulltext_query('NetAlertX', ['minamo', 'haruo'], FAKE_DRIVER) == (
+        '(group_id:"minamo" OR group_id:"haruo") AND (\\Net\\AlertX)'
+    )
+
+
+def test_legacy_fulltext_query_without_groups():
+    assert fulltext_query('NetAlertX', None, FAKE_DRIVER) == '(\\Net\\AlertX)'
 
 
 def test_group_filter_is_parenthesised_before_the_query():
