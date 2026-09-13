@@ -470,6 +470,13 @@ class CrossEncoderFactory:
                 )
             )
 
+        # A Vertex-configured Gemini embedder gives a reranker that works without any extra
+        # credential, so prefer it before the provider probe (the probe's first choice, an
+        # OpenAI-compatible LLM, yields OpenAIRerankerClient, which this endpoint rejects).
+        gem_cfg = getattr(getattr(embedder_config, 'providers', None), 'gemini', None)
+        if gem_cfg is not None and getattr(gem_cfg, 'vertexai', False):
+            return CrossEncoderFactory._gemini_reranker(embedder_config, model, logger)
+
         # Try the LLM provider first, then the embedder, before falling back to a local model.
         for source, config in (('LLM', llm_config), ('embedder', embedder_config)):
             reranker = CrossEncoderFactory._reranker_for_provider(source, config, logger)

@@ -837,7 +837,8 @@ async def search_memory_facts(
         # Superseded facts are dropped *after* the search, so ask for a wider page: with
         # max_facts as the Cypher LIMIT, a top-k consisting of invalidated facts would starve
         # the result (this ledger keeps ~76 of them). Over-fetch, filter, then truncate.
-        slack = 0 if include_invalidated else min(20, max(5, max_facts))
+        # Enough extra rows that a page of superseded facts cannot starve the result.
+        slack = 0 if include_invalidated else min(20, max(5, max_facts))  # >=5, capped at 20
         # min_score floors the *reranker*. Omitted -> take the server-side default from
         # config.reranker.min_score when the cross encoder is in play (0.0 for RRF, whose
         # scores are a rank ladder rather than a relevance value).
