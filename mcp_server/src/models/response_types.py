@@ -36,6 +36,7 @@ class FactSearchResponse(TypedDict):
 class FactExportResponse(TypedDict):
     message: str
     facts: list[dict[str, Any]]
+    truncated: bool
 
 
 class EpisodeSearchResponse(TypedDict):

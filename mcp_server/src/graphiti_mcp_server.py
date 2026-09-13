@@ -96,6 +96,9 @@ SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 10))
 
 # Hard cap for export_facts: the page is materialised in memory before it is serialised.
 MAX_EXPORT_FACTS = int(os.getenv('MAX_EXPORT_FACTS', 20000))
+# Cap for ranked searches: with the cross-encoder reranker each candidate is one LLM call, so
+# an unbounded max_facts is a cheap way to burn quota on an unauthenticated HTTP endpoint.
+MAX_SEARCH_FACTS = int(os.getenv('MAX_SEARCH_FACTS', 50))
 
 
 # Configure structured logging with timestamps
@@ -613,25 +616,38 @@ async def export_facts(
 
         client = await graphiti_service.get_client()
         groups = coerce_group_ids(group_ids)
-        if groups is None:
+        # `not groups` (not `is None`): an explicit empty list must not silently widen the
+        # export to every group — search_memory_facts treats [] as "nothing", so be symmetric.
+        if not groups:
             groups = [config.graphiti.group_id] if config.graphiti.group_id else []
+            if not groups:
+                return ErrorResponse(error='no group_ids given and no default group configured')
 
+        # Ordered so a mirror built from repeated exports grows monotonically, and one row past
+        # the limit so truncation can be reported instead of silently serving a partial index.
         cypher = (
             'MATCH ()-[e:RELATES_TO]->()'
-            + (' WHERE e.group_id IN $group_ids' if groups else '')
-            + (' AND ' if groups else ' WHERE ')
+            ' WHERE e.group_id IN $group_ids AND '
             + ('e.invalid_at IS NULL' if not include_invalidated else 'true')
             + ' RETURN e.uuid AS uuid, e.group_id AS group_id, e.name AS name, e.fact AS fact,'
             ' toString(e.created_at) AS created_at, toString(e.invalid_at) AS invalid_at'
+            ' ORDER BY e.created_at, e.uuid'
             ' LIMIT $limit'
         )
         records, _, _ = await client.driver.execute_query(
-            cypher, group_ids=groups, limit=int(limit), routing_='r'
+            cypher, group_ids=groups, limit=int(limit) + 1, routing_='r'
         )
-        facts = [dict(r) for r in records]
-        logger.info('[export_facts] groups=%s include_invalidated=%s -> %d facts',
-                    groups, include_invalidated, len(facts))
-        return FactExportResponse(message='Facts exported successfully', facts=facts)
+        rows = [dict(r) for r in records]
+        truncated = len(rows) > int(limit)
+        facts = rows[: int(limit)]
+        if truncated:
+            logger.warning('[export_facts] truncated at limit=%s groups=%s — raise fts_export_limit '
+                           'or page the export; the mirror would otherwise be a partial index',
+                           limit, groups)
+        logger.info('[export_facts] groups=%s include_invalidated=%s -> %d facts (truncated=%s)',
+                    groups, include_invalidated, len(facts), truncated)
+        return FactExportResponse(message='Facts exported successfully', facts=facts,
+                                  truncated=truncated)
     except Exception as e:  # noqa: BLE001
         error_msg = str(e)
         logger.error(f'Error exporting facts: {error_msg}')
@@ -734,7 +750,7 @@ async def search_memory_facts(
     valid_at_before: str | None = None,
     invalid_at_after: str | None = None,
     invalid_at_before: str | None = None,
-    min_score: float = 0.0,
+    min_score: float | None = None,
     sim_min_score: float | None = None,
     reranker: str | None = None,
     include_invalidated: bool = False,
@@ -781,6 +797,8 @@ async def search_memory_facts(
         # Validate max_facts parameter
         if max_facts <= 0:
             return ErrorResponse(error='max_facts must be a positive integer')
+        if max_facts > MAX_SEARCH_FACTS:
+            return ErrorResponse(error=f'max_facts must be <= {MAX_SEARCH_FACTS} (got {max_facts})')
 
         # Build search filters from the optional edge-type / date-range params.
         try:
@@ -820,8 +838,15 @@ async def search_memory_facts(
         # max_facts as the Cypher LIMIT, a top-k consisting of invalidated facts would starve
         # the result (this ledger keeps ~76 of them). Over-fetch, filter, then truncate.
         slack = 0 if include_invalidated else min(20, max(5, max_facts))
+        # min_score floors the *reranker*. Omitted -> take the server-side default from
+        # config.reranker.min_score when the cross encoder is in play (0.0 for RRF, whose
+        # scores are a rank ladder rather than a relevance value).
+        want_ce = bool(reranker) and reranker.strip().lower() == 'cross_encoder'
+        effective_min = float(min_score) if min_score is not None else (
+            float(getattr(config.reranker, 'min_score', 0.0)) if want_ce else 0.0
+        )
         search_config.limit = max_facts + slack
-        search_config.reranker_min_score = max(0.0, float(min_score))
+        search_config.reranker_min_score = max(0.0, effective_min)
         if sim_min_score is not None and search_config.edge_config is not None:
             search_config.edge_config.sim_min_score = max(0.0, float(sim_min_score))
 
@@ -856,7 +881,7 @@ async def search_memory_facts(
             logger.info(
                 '[search_memory_facts] query=%r groups=%s max_facts=%s min_score=%s '
                 'sim_min_score=%s reranker=%s include_invalidated=%s edges=%s',
-                query, effective_group_ids, max_facts, min_score, sim_min_score, reranker,
+                query, effective_group_ids, max_facts, effective_min, sim_min_score, reranker,
                 include_invalidated, len(relevant_edges),
             )
 

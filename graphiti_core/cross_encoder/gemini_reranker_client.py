@@ -76,8 +76,8 @@ class GeminiRerankerClient(CrossEncoderClient):
 
         Each passage is scored individually on a 0-100 scale, then normalized to [0,1].
         """
-        if len(passages) <= 1:
-            return [(passage, 1.0) for passage in passages]
+        # No single-candidate shortcut: returning 1.0 for the only passage means any candidate
+        # that survived the legs passes any floor. Score it like the others (one API call).
 
         # Generate scoring prompts for each passage
         scoring_prompts = []

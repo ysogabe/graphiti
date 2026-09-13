@@ -453,6 +453,10 @@ class CrossEncoderFactory:
 
         if explicit == 'gemini':
             return CrossEncoderFactory._gemini_reranker(embedder_config, model, logger)
+        if explicit not in ('auto', 'gemini', 'openai'):
+            raise ValueError(
+                f"Unknown reranker.provider {explicit!r}; use 'auto', 'gemini' or 'openai'"
+            )
         if explicit == 'openai':
             openai_cfg = llm_config.providers.openai
             if not openai_cfg:

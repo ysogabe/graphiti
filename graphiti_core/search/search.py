@@ -404,7 +404,12 @@ async def edge_search(
                     )
             elif config.reranker == EdgeReranker.cross_encoder:
                 search_result_uuids = [[edge.uuid for edge in result] for result in search_results]
-                rrf_result_uuids, _ = rrf(search_result_uuids, min_score=reranker_min_score)
+                # Do NOT pre-cut with reranker_min_score here: that value is a *reranker* score
+                # threshold (0-1 from the cross encoder), while RRF produces 1/(rank+1) sums.
+                # Applying it to the RRF stage silently starves the cross encoder — measured on
+                # this deployment, min_score=0.5 left it with a couple of candidates, so its
+                # verdicts were made on a net the legs had already narrowed.
+                rrf_result_uuids, _ = rrf(search_result_uuids, min_score=0)
                 rrf_edges = [edge_uuid_map[uuid] for uuid in rrf_result_uuids][: 2 * limit]
                 fact_to_uuid_map = {edge.fact: edge.uuid for edge in rrf_edges}
                 with _trace_phase(
