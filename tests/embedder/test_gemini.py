@@ -16,12 +16,12 @@ limitations under the License.
 
 # Running tests: pytest -xvs tests/embedder/test_gemini.py
 
+import math
 from collections.abc import Generator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from embedder_fixtures import create_embedding_values
 
 from graphiti_core.embedder.gemini import (
     DEFAULT_EMBEDDING_MODEL,
@@ -31,10 +31,22 @@ from graphiti_core.embedder.gemini import (
 
 
 def create_gemini_embedding(multiplier: float = 0.1, dimension: int = 1536) -> MagicMock:
-    """Create a mock Gemini embedding with specified value multiplier and dimension."""
+    """Create a mock Gemini embedding with specified value multiplier and dimension.
+
+    Values are offset by their index so that two multipliers never produce vectors that are
+    scalar multiples of one another: the embedder L2-normalises what it returns, and
+    proportional inputs would collapse onto a single unit vector (the degenerate case the
+    embedder now reports as an error).
+    """
     mock_embedding = MagicMock()
-    mock_embedding.values = create_embedding_values(multiplier, dimension)
+    mock_embedding.values = [multiplier + index / dimension for index in range(dimension)]
     return mock_embedding
+
+
+def normalize(values: list[float]) -> list[float]:
+    """Expected post-processing: the embedder stores unit vectors."""
+    norm = math.sqrt(sum(value * value for value in values))
+    return [value / norm for value in values]
 
 
 @pytest.fixture
@@ -110,7 +122,6 @@ class TestGeminiEmbedderInitialization:
         assert embedder.config.api_key == 'test_api_key'
         assert embedder.config.embedding_model == DEFAULT_EMBEDDING_MODEL
 
-
     @patch('google.genai.Client')
     def test_init_vertex_mode_builds_vertexai_client(self, mock_client):
         """Vertex AI mode must build the client with vertexai=True + project + location.
@@ -167,8 +178,8 @@ class TestGeminiEmbedderCreate:
         assert kwargs['model'] == DEFAULT_EMBEDDING_MODEL
         assert kwargs['contents'] == ['Test input']
 
-        # Verify result is processed correctly
-        assert result == mock_gemini_response.embeddings[0].values
+        # Verify result is processed correctly (values come back L2-normalised)
+        assert result == pytest.approx(normalize(mock_gemini_response.embeddings[0].values))
 
     @pytest.mark.asyncio
     @patch('google.genai.Client')
@@ -296,12 +307,12 @@ class TestGeminiEmbedderCreateBatch:
         assert kwargs['model'] == DEFAULT_EMBEDDING_MODEL
         assert kwargs['contents'] == input_batch
 
-        # Verify all results are processed correctly
+        # Verify all results are processed correctly (values come back L2-normalised)
         assert len(result) == 3
         assert result == [
-            mock_gemini_batch_response.embeddings[0].values,
-            mock_gemini_batch_response.embeddings[1].values,
-            mock_gemini_batch_response.embeddings[2].values,
+            pytest.approx(normalize(mock_gemini_batch_response.embeddings[0].values)),
+            pytest.approx(normalize(mock_gemini_batch_response.embeddings[1].values)),
+            pytest.approx(normalize(mock_gemini_batch_response.embeddings[2].values)),
         ]
 
     @pytest.mark.asyncio
@@ -318,7 +329,7 @@ class TestGeminiEmbedderCreateBatch:
         result = await gemini_embedder.create_batch(input_batch)
 
         assert len(result) == 1
-        assert result[0] == mock_gemini_response.embeddings[0].values
+        assert result[0] == pytest.approx(normalize(mock_gemini_response.embeddings[0].values))
 
     @pytest.mark.asyncio
     async def test_create_batch_empty_input(
@@ -422,6 +433,101 @@ class TestGeminiEmbedderCreateBatch:
         # Verify results have correct dimension
         assert len(result) == 2
         assert all(len(embedding) == 512 for embedding in result)
+
+
+class TestGeminiEmbedderNormalisationAndCollapseDetection:
+    """Unit vectors out, and a loud error when distinct inputs share one vector.
+
+    Regression cover for the measured Vertex failure mode: text-embedding-005 over an
+    API-key route returns one constant vector for every input it cannot tokenise (all CJK,
+    Korean, Greek, emoji), so 'みなも' and 'トヨタ' ended up with the same name_embedding in
+    the ledger and became each other's strongest cosine merge candidate.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_returns_unit_vector(
+        self,
+        gemini_embedder: GeminiEmbedder,
+        mock_gemini_client: Any,
+        mock_gemini_response: MagicMock,
+    ) -> None:
+        """Values from the API are L2-normalised before they leave the embedder."""
+        mock_gemini_client.aio.models.embed_content.return_value = mock_gemini_response
+
+        result = await gemini_embedder.create('Test input')
+
+        assert math.sqrt(sum(value * value for value in result)) == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_create_batch_returns_unit_vectors(
+        self,
+        gemini_embedder: GeminiEmbedder,
+        mock_gemini_client: Any,
+        mock_gemini_batch_response: MagicMock,
+    ) -> None:
+        """Every vector of a batch is L2-normalised, whatever the API's scale was."""
+        mock_gemini_client.aio.models.embed_content.return_value = mock_gemini_batch_response
+
+        result = await gemini_embedder.create_batch(['Input 1', 'Input 2', 'Input 3'])
+
+        assert all(
+            math.sqrt(sum(value * value for value in embedding)) == pytest.approx(1.0)
+            for embedding in result
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_batch_flags_distinct_inputs_sharing_a_vector(
+        self,
+        gemini_embedder: GeminiEmbedder,
+        mock_gemini_client: Any,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Distinct inputs collapsing onto one vector is reported as an error."""
+        collapsed = create_gemini_embedding(0.1, 8)
+        mock_response = MagicMock()
+        mock_response.embeddings = [collapsed, collapsed]
+        mock_gemini_client.aio.models.embed_content.return_value = mock_response
+
+        with caplog.at_level('ERROR'):
+            result = await gemini_embedder.create_batch(['みなも', 'トヨタ'])
+
+        assert len(result) == 2
+        assert 'collapsed' in caplog.text
+        assert 'トヨタ' in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_create_batch_accepts_duplicate_texts_sharing_a_vector(
+        self,
+        gemini_embedder: GeminiEmbedder,
+        mock_gemini_client: Any,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The same text twice legitimately shares a vector — that is not a defect."""
+        repeated = create_gemini_embedding(0.1, 8)
+        mock_response = MagicMock()
+        mock_response.embeddings = [repeated, repeated]
+        mock_gemini_client.aio.models.embed_content.return_value = mock_response
+
+        with caplog.at_level('ERROR'):
+            await gemini_embedder.create_batch(['同じ名前', '同じ名前'])
+
+        assert 'collapsed' not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_create_batch_stays_quiet_for_distinct_vectors(
+        self,
+        gemini_embedder: GeminiEmbedder,
+        mock_gemini_client: Any,
+        mock_gemini_batch_response: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A healthy embedder logs nothing."""
+        mock_gemini_client.aio.models.embed_content.return_value = mock_gemini_batch_response
+
+        with caplog.at_level('ERROR'):
+            await gemini_embedder.create_batch(['Input 1', 'Input 2', 'Input 3'])
+
+        assert 'collapsed' not in caplog.text
 
 
 if __name__ == '__main__':

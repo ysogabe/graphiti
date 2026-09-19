@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import logging
+import math
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,50 @@ logger = logging.getLogger(__name__)
 DEFAULT_EMBEDDING_MODEL = 'text-embedding-001'  # gemini-embedding-001 or text-embedding-005
 
 DEFAULT_BATCH_SIZE = 100
+
+
+def _normalize(vector: list[float]) -> list[float]:
+    """L2-normalise an embedding vector.
+
+    MRL-truncated embeddings (gemini-embedding-001 asked for output_dimensionality < 3072)
+    come back *un-normalised* (measured |v| ~ 0.58 at 768d), while the ledger stores unit
+    vectors and the search floors are calibrated on that scale. Normalising here keeps both
+    models on one scale instead of leaking the difference into the graph.
+    """
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0 or math.isnan(norm):
+        return vector
+    return [value / norm for value in vector]
+
+
+def _warn_on_collapsed_embeddings(
+    input_data_list: list[str], embeddings: list[list[float]]
+) -> None:
+    """Log an error when distinct inputs come back with the same vector.
+
+    Measured failure mode (Vertex text-embedding-005 over an API-key route): every input whose
+    characters the model's tokenizer does not cover (CJK, Korean, Greek, emoji) is replaced by
+    a generic placeholder token, so 'みなも' and 'トヨタ' both embed to the *same* constant
+    vector and pure-CJK queries collapse onto it. Duplicate-name detection is cosine-based, so
+    a silent collapse makes those nodes each other's strongest merge candidate. Nothing here
+    can repair the vector — the point is to make the defect visible instead of writing it into
+    the graph.
+    """
+    by_vector: dict[tuple[float, ...], list[str]] = {}
+    for text, embedding in zip(input_data_list, embeddings, strict=False):
+        by_vector.setdefault(tuple(embedding), []).append(text)
+
+    for texts in by_vector.values():
+        distinct = sorted(set(texts))
+        if len(distinct) > 1:
+            logger.error(
+                'Embedder collapsed %d distinct inputs onto one vector (%s). The embedding '
+                'route is not encoding these characters; fix the embedder model/route before '
+                'trusting dedupe or cosine search. Affected inputs: %s',
+                len(distinct),
+                ' + '.join(texts[:3]),
+                distinct[:5],
+            )
 
 
 class GeminiEmbedderConfig(EmbedderConfig):
@@ -131,7 +176,7 @@ class GeminiEmbedder(EmbedderClient):
         if not result.embeddings or len(result.embeddings) == 0 or not result.embeddings[0].values:
             raise ValueError('No embeddings returned from Gemini API in create()')
 
-        return result.embeddings[0].values
+        return _normalize(list(result.embeddings[0].values))
 
     async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:
         """
@@ -173,7 +218,7 @@ class GeminiEmbedder(EmbedderClient):
                 for embedding in result.embeddings:
                     if not embedding.values:
                         raise ValueError('Empty embedding values returned')
-                    all_embeddings.append(embedding.values)
+                    all_embeddings.append(_normalize(list(embedding.values)))
 
             except Exception as e:
                 # If batch processing fails, fall back to individual processing
@@ -197,10 +242,11 @@ class GeminiEmbedder(EmbedderClient):
                         if not result.embeddings[0].values:
                             raise ValueError('Empty embedding values returned')
 
-                        all_embeddings.append(result.embeddings[0].values)
+                        all_embeddings.append(_normalize(list(result.embeddings[0].values)))
 
                     except Exception as individual_error:
                         logger.error(f'Failed to embed individual item: {individual_error}')
                         raise individual_error
 
+        _warn_on_collapsed_embeddings(input_data_list, all_embeddings)
         return all_embeddings
