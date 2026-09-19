@@ -144,14 +144,21 @@ class GeminiEmbedder(EmbedderClient):
         else:
             self.client = client
 
-        if batch_size is None and self.config.embedding_model == 'gemini-embedding-001':
+        if batch_size is not None:
+            self.batch_size = batch_size
+        elif config.vertexai:
+            # Vertex :predict takes a batch of instances (250 max per request), so one request
+            # can carry DEFAULT_BATCH_SIZE texts. The single-instance limit documented for
+            # gemini-embedding-001 applies to the Gemini Developer API only.
+            # Measured: 100 CJK names in one Vertex request come back as 100 distinct vectors,
+            # identical to embedding them one by one.
+            self.batch_size = DEFAULT_BATCH_SIZE
+        elif self.config.embedding_model == 'gemini-embedding-001':
             # Gemini API has a limit on the number of instances per request
             # https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api
             self.batch_size = 1
-        elif batch_size is None:
-            self.batch_size = DEFAULT_BATCH_SIZE
         else:
-            self.batch_size = batch_size
+            self.batch_size = DEFAULT_BATCH_SIZE
 
     async def create(
         self, input_data: str | list[str] | Iterable[int] | Iterable[Iterable[int]]

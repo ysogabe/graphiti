@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from graphiti_core.embedder.gemini import (
+    DEFAULT_BATCH_SIZE,
     DEFAULT_EMBEDDING_MODEL,
     GeminiEmbedder,
     GeminiEmbedderConfig,
@@ -153,6 +154,39 @@ class TestGeminiEmbedderInitialization:
         GeminiEmbedder(config=config)
 
         mock_client.assert_called_once_with(api_key='dev-key')
+
+    @patch('google.genai.Client')
+    def test_init_batches_gemini_embedding_001_on_vertex(self, mock_client):
+        """Vertex :predict takes batches, so the 1-instance Developer API limit must not apply."""
+        config = GeminiEmbedderConfig(
+            api_key='vertex-key',
+            embedding_model='gemini-embedding-001',
+            embedding_dim=768,
+            vertexai=True,
+            project_id='proj-1',
+            location='global',
+        )
+        embedder = GeminiEmbedder(config=config)
+
+        assert embedder.batch_size == DEFAULT_BATCH_SIZE
+
+    @patch('google.genai.Client')
+    def test_init_keeps_gemini_embedding_001_single_on_dev_api(self, mock_client):
+        """The Developer API rejects multi-instance requests for gemini-embedding-001."""
+        config = GeminiEmbedderConfig(api_key='dev-key', embedding_model='gemini-embedding-001')
+        embedder = GeminiEmbedder(config=config)
+
+        assert embedder.batch_size == 1
+
+    @patch('google.genai.Client')
+    def test_init_explicit_batch_size_wins(self, mock_client):
+        """An explicit batch_size overrides both policies."""
+        config = GeminiEmbedderConfig(
+            api_key='vertex-key', embedding_model='gemini-embedding-001', vertexai=True
+        )
+        embedder = GeminiEmbedder(config=config, batch_size=7)
+
+        assert embedder.batch_size == 7
 
 
 class TestGeminiEmbedderCreate:
