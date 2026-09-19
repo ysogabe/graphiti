@@ -19,7 +19,13 @@ llm:
 
 embedder:
   provider: gemini
-  model: ${EMBEDDER_MODEL:text-embedding-005}
+  # gemini-embedding-001, NOT text-embedding-005: measured over this Vertex API-key route,
+  # text-embedding-005 (and -004) do not encode CJK at all — every input whose characters the
+  # tokenizer does not cover collapses onto one constant vector per chunk-count ('みなも',
+  # 'トヨタ', 'ミナモ' and '한국어' all return the same 768d vector; two space-separated CJK
+  # chunks return a second constant). gemini-embedding-001 encodes them properly
+  # (5/5 related-vs-unrelated separation on Japanese pairs, vs 1/5 for 005).
+  model: ${EMBEDDER_MODEL:gemini-embedding-001}
   dimensions: ${EMBEDDER_DIMENSIONS:768}
   providers:
     gemini:
