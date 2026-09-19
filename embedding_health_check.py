@@ -34,6 +34,13 @@ from neo4j import GraphDatabase
 PROBE_TEXTS = ['みなも', 'トヨタ', 'エコーショー']  # distinct, same script -> must not collide
 CONTROL_TEXTS = ['minamo', 'toyota']  # ASCII control: these always worked
 
+# Mirrors the defaults in mcp_server/config/deploy.yaml so the probe checks the route the
+# server actually uses; override with EMBEDDER_MODEL / EMBEDDER_DIMENSIONS when it changes.
+DEFAULT_MODEL = 'gemini-embedding-001'
+DEFAULT_DIMENSIONS = 768
+DEFAULT_PROJECT = '257425471273'
+DEFAULT_LOCATION = 'global'
+
 
 def vector_hash(vector: list[float]) -> str:
     return hashlib.sha256(','.join(f'{value:.6f}' for value in vector).encode()).hexdigest()[:12]
@@ -45,13 +52,18 @@ def build_embedder():
     vertexai = os.environ.get('EMBEDDER_VERTEXAI', 'true').lower() in ('1', 'true', 'yes')
     config = GeminiEmbedderConfig(
         api_key=os.environ['GOOGLE_API_KEY'],
-        embedding_model=os.environ.get('EMBEDDER_MODEL', 'gemini-embedding-001'),
-        embedding_dim=int(os.environ.get('EMBEDDER_DIMENSIONS', '768')),
+        embedding_model=os.environ.get('EMBEDDER_MODEL', DEFAULT_MODEL),
+        embedding_dim=int(os.environ.get('EMBEDDER_DIMENSIONS', str(DEFAULT_DIMENSIONS))),
         vertexai=vertexai,
-        project_id=os.environ.get('GOOGLE_CLOUD_PROJECT'),
-        location=os.environ.get('GOOGLE_CLOUD_LOCATION', 'global'),
+        project_id=os.environ.get('GOOGLE_CLOUD_PROJECT', DEFAULT_PROJECT),
+        location=os.environ.get('GOOGLE_CLOUD_LOCATION', DEFAULT_LOCATION),
     )
     return GeminiEmbedder(config=config)
+
+
+def probe_available() -> bool:
+    """The probe needs the Vertex credentials; without them only the ledger is checked."""
+    return bool(os.environ.get('GOOGLE_API_KEY'))
 
 
 def ledger_findings(driver) -> tuple[list[str], dict[str, int]]:
@@ -134,7 +146,11 @@ def main() -> int:
         print(f'  {key}: {value}')
 
     hashes: dict[str, str] = {}
-    if not args.skip_probe:
+    if args.skip_probe:
+        print('\n=== live embedder probe ===\n  skipped (--skip-probe)')
+    elif not probe_available():
+        print('\n=== live embedder probe ===\n  skipped (GOOGLE_API_KEY is not set)')
+    else:
         probe_findings, hashes = asyncio.run(embedder_findings())
         findings.extend(probe_findings)
         print('\n=== live embedder probe ===')
