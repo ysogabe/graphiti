@@ -126,7 +126,7 @@ def get_fulltext_indices(
                                                     label: 'Community',
                                                     stopwords: {stopwords_str}
                                                 }},
-                                                'name', 'group_id'
+                                                'name', 'summary', 'group_id'
                                                 )""",
                 """CREATE FULLTEXT INDEX FOR ()-[e:RELATES_TO]-() ON (e.name, e.fact, e.group_id)""",
             ],
@@ -165,7 +165,7 @@ def get_fulltext_indices(
         FOR (n:Entity) ON EACH [n.name, n.summary, n.group_id]"""
         + opts,
         """CREATE FULLTEXT INDEX community_name IF NOT EXISTS
-        FOR (n:Community) ON EACH [n.name, n.group_id]"""
+        FOR (n:Community) ON EACH [n.name, n.summary, n.group_id]"""
         + opts,
         """CREATE FULLTEXT INDEX edge_name_and_fact IF NOT EXISTS
         FOR ()-[e:RELATES_TO]-() ON EACH [e.name, e.fact, e.group_id]"""

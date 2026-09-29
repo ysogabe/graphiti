@@ -262,6 +262,7 @@ async def build_communities(
     driver: GraphDriver,
     llm_client: LLMClient,
     group_ids: list[str] | None,
+    embedder: EmbedderClient | None = None,
 ) -> tuple[list[CommunityNode], list[CommunityEdge]]:
     community_clusters = await get_community_clusters(driver, group_ids)
 
@@ -282,6 +283,12 @@ async def build_communities(
     for community in communities:
         community_nodes.append(community[0])
         community_edges.extend(community[1])
+
+    if embedder is not None:
+        await semaphore_gather(
+            *[node.generate_summary_embedding(embedder) for node in community_nodes],
+            max_coroutines=MAX_COMMUNITY_BUILD_CONCURRENCY,
+        )
 
     return community_nodes, community_edges
 
@@ -398,6 +405,7 @@ async def update_community(
 
     community.summary = new_summary
     community.name = new_name
+    await community.generate_summary_embedding(embedder)
 
     community_edges = []
     if is_new:

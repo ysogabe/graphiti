@@ -686,6 +686,9 @@ class EntityNode(Node):
 
 class CommunityNode(Node):
     name_embedding: list[float] | None = Field(default=None, description='embedding of the name')
+    summary_embedding: list[float] | None = Field(
+        default=None, description='embedding of the summary'
+    )
     summary: str = Field(description='region summary of member nodes', default_factory=str)
 
     async def save(self, driver: GraphDriver):
@@ -707,6 +710,7 @@ class CommunityNode(Node):
             group_id=self.group_id,
             summary=self.summary,
             name_embedding=self.name_embedding,
+            summary_embedding=self.summary_embedding,
             created_at=self.created_at,
         )
 
@@ -724,6 +728,15 @@ class CommunityNode(Node):
         )
 
         return self.name_embedding
+
+    async def generate_summary_embedding(self, embedder: EmbedderClient):
+        text = self.summary.replace('\n', ' ').strip()
+        if not text:
+            self.summary_embedding = None
+            return None
+
+        self.summary_embedding = await embedder.create(input_data=[text])
+        return self.summary_embedding
 
     async def load_name_embedding(self, driver: GraphDriver):
         if driver.graph_operations_interface:
@@ -1085,6 +1098,7 @@ def get_community_node_from_record(record: Any) -> CommunityNode:
         name=record['name'],
         group_id=record['group_id'],
         name_embedding=record['name_embedding'],
+        summary_embedding=record.get('summary_embedding'),
         created_at=parse_db_date(record['created_at']),  # type: ignore
         summary=record['summary'],
     )

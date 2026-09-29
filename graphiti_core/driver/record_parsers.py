@@ -115,6 +115,7 @@ def community_node_from_record(record: Any) -> CommunityNode:
         name=record['name'],
         group_id=record['group_id'],
         name_embedding=record['name_embedding'],
+        summary_embedding=record.get('summary_embedding'),
         created_at=parse_db_date(record['created_at']),  # type: ignore[arg-type]
         summary=record['summary'],
     )

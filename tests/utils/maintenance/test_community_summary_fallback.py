@@ -1,7 +1,7 @@
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import tenacity
@@ -9,11 +9,12 @@ import tenacity
 from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.llm_client.errors import EmptyResponseError, ResponseTruncatedError
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
-from graphiti_core.nodes import EntityNode
+from graphiti_core.nodes import CommunityNode, EntityNode
 from graphiti_core.utils.maintenance import community_operations
 from graphiti_core.utils.maintenance.community_operations import (
     COMMUNITY_SUMMARY_FALLBACKS,
     RESCUE_SUMMARY_CHARS,
+    build_communities,
     build_community,
     generate_summary_description,
     summarize_pair,
@@ -173,6 +174,51 @@ async def test_build_community_uses_fallback_name_when_only_description_fails():
     assert community.name == 'Merged summary.'
     assert COMMUNITY_SUMMARY_FALLBACKS['summarize_pair'] == 0
     assert COMMUNITY_SUMMARY_FALLBACKS['summary_description'] == 1
+
+
+@pytest.mark.asyncio
+async def test_build_communities_generates_summary_embeddings():
+    driver = MagicMock()
+    llm_client = _llm([])
+    embedder = MagicMock()
+    embedder.create = AsyncMock(return_value=[0.1, 0.2])
+    community = CommunityNode(name='Local food', group_id='group-a', summary='Nearby farms.')
+
+    with (
+        patch.object(
+            community_operations,
+            'get_community_clusters',
+            new_callable=AsyncMock,
+            return_value=[[]],
+        ),
+        patch.object(
+            community_operations,
+            'build_community',
+            new_callable=AsyncMock,
+            return_value=(community, []),
+        ),
+    ):
+        communities, edges = await build_communities(
+            driver, llm_client, ['group-a'], embedder=embedder
+        )
+
+    assert communities == [community]
+    assert communities[0].summary_embedding == [0.1, 0.2]
+    assert edges == []
+    embedder.create.assert_awaited_once_with(input_data=['Nearby farms.'])
+
+
+@pytest.mark.asyncio
+async def test_generate_summary_embedding_skips_empty_summary():
+    community = CommunityNode(name='Empty', group_id='group-a', summary='  \n ')
+    embedder = MagicMock()
+    embedder.create = AsyncMock()
+
+    result = await community.generate_summary_embedding(embedder)
+
+    assert result is None
+    assert community.summary_embedding is None
+    embedder.create.assert_not_awaited()
 
 
 async def _fallback_merge(left: str, right: str) -> str:

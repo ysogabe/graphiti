@@ -300,7 +300,7 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
         case GraphProvider.FALKORDB:
             return """
                 MERGE (n:Community {uuid: $uuid})
-                SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at, name_embedding: vecf32($name_embedding)}
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at, name_embedding: vecf32($name_embedding), summary_embedding: CASE WHEN $summary_embedding IS NULL THEN null ELSE vecf32($summary_embedding) END}
                 RETURN n.uuid AS uuid
             """
         case GraphProvider.NEPTUNE:
@@ -308,6 +308,7 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
                 MERGE (n:Community {uuid: $uuid})
                 SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at}
                 SET n.name_embedding = join([x IN coalesce($name_embedding, []) | toString(x) ], ",")
+                SET n.summary_embedding = CASE WHEN $summary_embedding IS NULL THEN null ELSE join([x IN $summary_embedding | toString(x) ], ",") END
                 RETURN n.uuid AS uuid
             """
         case GraphProvider.KUZU:
@@ -318,6 +319,7 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
                     n.group_id = $group_id,
                     n.created_at = $created_at,
                     n.name_embedding = $name_embedding,
+                    n.summary_embedding = $summary_embedding,
                     n.summary = $summary
                 RETURN n.uuid AS uuid
             """
@@ -325,6 +327,7 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
             return """
                 MERGE (n:Community {uuid: $uuid})
                 SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at}
+                SET n.summary_embedding = $summary_embedding
                 WITH n CALL db.create.setNodeVectorProperty(n, "name_embedding", $name_embedding)
                 RETURN n.uuid AS uuid
             """
@@ -336,6 +339,7 @@ COMMUNITY_NODE_RETURN = """
     c.group_id AS group_id,
     c.created_at AS created_at,
     c.name_embedding AS name_embedding,
+    c.summary_embedding AS summary_embedding,
     c.summary AS summary
 """
 
@@ -345,6 +349,7 @@ COMMUNITY_NODE_RETURN_NEPTUNE = """
     [x IN split(n.name_embedding, ",") | toFloat(x)] AS name_embedding,
     n.group_id AS group_id,
     n.summary AS summary,
+    [x IN split(n.summary_embedding, ",") | toFloat(x)] AS summary_embedding,
     n.created_at AS created_at
 """
 

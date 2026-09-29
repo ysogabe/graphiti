@@ -80,6 +80,7 @@ SCHEMA_QUERIES = """
         group_id STRING,
         created_at TIMESTAMP,
         name_embedding FLOAT[],
+        summary_embedding FLOAT[],
         summary STRING
     );
     CREATE NODE TABLE IF NOT EXISTS RelatesToNode_ (
