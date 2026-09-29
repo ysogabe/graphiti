@@ -165,6 +165,21 @@ def test_long_chain_converges_under_default_cap(caplog):
     assert not caplog.records
 
 
+def test_sorted_chain_converges_in_few_sweeps(caplog):
+    """名前順に並んだ鎖 n00..n09（重み 2）は降順 sweep なら 2 sweep で収束する。
+
+    昇順 sweep だと最大 id が 1 sweep に 1 ホップしか進まず n sweep かかり、上限 3 を踏む。
+    """
+    proj = _projection(_chain_of([f'n{i:02d}' for i in range(10)], 2))
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        clusters = label_propagation(proj, max_iterations=3)
+
+    _assert_each_node_once(clusters, proj)
+    assert len(clusters) == 1
+    assert not caplog.records
+
+
 def test_asymmetric_projection_hits_cap_and_warns(caplog):
     """非対称な隣接（並行取り込み中の逐次クエリで起こりうる）は非同期版でも永久に振動する。
 
