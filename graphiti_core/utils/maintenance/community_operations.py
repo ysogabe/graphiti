@@ -123,7 +123,28 @@ async def _summarize_pair_llm(llm_client: LLMClient, summary_pair: tuple[str, st
     return truncate_at_sentence(pair_summary, MAX_SUMMARY_CHARS)
 
 
+def _merge_summaries_deterministically(summary_pair: tuple[str, str]) -> str:
+    # Split the budget before joining: truncating the joined text instead would cut back to the
+    # last sentence end, which drops the whole right side when it has no sentence terminator.
+    left, right = (s.strip() for s in summary_pair)
+    if not right:
+        return truncate_at_sentence(left, MAX_SUMMARY_CHARS)
+    if not left:
+        return truncate_at_sentence(right, MAX_SUMMARY_CHARS)
+    left = truncate_at_sentence(left, RESCUE_SUMMARY_CHARS)
+    # The right side gets whatever the left left over, minus the separating space. Since
+    # truncate_at_sentence hard-cuts when there is no sentence end, it never comes back empty.
+    right = truncate_at_sentence(right, max(MAX_SUMMARY_CHARS - len(left) - 1, 0))
+    return f'{left} {right}'.strip() if right else left
+
+
 async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
+    """Merge two summaries, surviving an exhausted LLM output budget.
+
+    At most 2 ``generate_response`` calls are made (the original prompt, then one retry with
+    shortened inputs); each call retries internally up to 4 attempts, so this issues at most
+    8 LLM requests before falling back to a deterministic merge.
+    """
     try:
         return await _summarize_pair_llm(llm_client, summary_pair)
     except _RECOVERABLE_SUMMARY_ERRORS as e:
@@ -141,14 +162,13 @@ async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -
         except _RECOVERABLE_SUMMARY_ERRORS as e:
             first_error = e
 
-    # Rescue 2: deterministic merge without the LLM. Each side is capped at half the budget
+    # Rescue 2: deterministic merge without the LLM. The left side is capped at half the budget
     # so a long left summary cannot crowd out the right one.
     COMMUNITY_SUMMARY_FALLBACKS['summarize_pair'] += 1
     logger.warning(
         f'summarize_pair fell back to a deterministic merge after LLM failure: {first_error!r}'
     )
-    merged = ' '.join(s for s in shortened if s)
-    return truncate_at_sentence(merged, MAX_SUMMARY_CHARS)
+    return _merge_summaries_deterministically(summary_pair)
 
 
 async def _generate_summary_description_llm(llm_client: LLMClient, summary: str) -> str:
@@ -168,6 +188,12 @@ async def _generate_summary_description_llm(llm_client: LLMClient, summary: str)
 
 
 async def generate_summary_description(llm_client: LLMClient, summary: str) -> str:
+    """Name a community from its summary, surviving an exhausted LLM output budget.
+
+    At most 2 ``generate_response`` calls are made (the original prompt, then one retry with a
+    shortened summary); each call retries internally up to 4 attempts, so this issues at most
+    8 LLM requests before falling back to the summary's leading sentence.
+    """
     try:
         return await _generate_summary_description_llm(llm_client, summary)
     except _RECOVERABLE_SUMMARY_ERRORS as e:
