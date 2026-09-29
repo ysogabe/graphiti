@@ -37,3 +37,13 @@ class EmptyResponseError(Exception):
     def __init__(self, message: str):
         self.message = message
         super().__init__(self.message)
+
+
+class ResponseTruncatedError(EmptyResponseError):
+    """Exception raised when the LLM exhausted its output budget before emitting any content.
+
+    Raised for an empty body with ``finish_reason == 'length'`` (e.g. a reasoning model that
+    spent all of ``max_tokens`` on reasoning). Unlike a plain ``EmptyResponseError`` this is
+    deterministic for a given prompt and budget, so it is not retried. Subclasses
+    ``EmptyResponseError`` so existing ``except EmptyResponseError`` handlers still catch it.
+    """

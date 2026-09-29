@@ -28,7 +28,7 @@ from ..prompts.models import Message
 from ..tracer import NoOpTracer, Tracer
 from .cache import LLMCache
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
-from .errors import EmptyResponseError, RateLimitError
+from .errors import EmptyResponseError, RateLimitError, ResponseTruncatedError
 from .token_tracker import TokenUsageTracker
 
 DEFAULT_TEMPERATURE = 0
@@ -64,6 +64,11 @@ def is_server_or_retry_error(exception):
     # provider/endpoint hiccup (common on the OpenAI-compatible/local servers the generic
     # client targets), which a retry can recover from. A persistent empty response still
     # fails after the bounded retries with a clear error.
+    # ResponseTruncatedError (empty body because the output budget ran out) is the exception:
+    # the same prompt and max_tokens fail the same way, so retrying only burns budget. It is
+    # checked first because it subclasses EmptyResponseError.
+    if isinstance(exception, ResponseTruncatedError):
+        return False
     if isinstance(exception, RateLimitError | EmptyResponseError | json.decoder.JSONDecodeError):
         return True
 

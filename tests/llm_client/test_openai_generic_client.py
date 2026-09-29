@@ -3,19 +3,32 @@ from types import SimpleNamespace
 
 import openai
 import pytest
+import tenacity
 from pydantic import BaseModel
 
 from graphiti_core.llm_client.config import LLMConfig
-from graphiti_core.llm_client.errors import EmptyResponseError, RateLimitError
+from graphiti_core.llm_client.errors import (
+    EmptyResponseError,
+    RateLimitError,
+    ResponseTruncatedError,
+)
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.prompts.models import Message
 
 
 class DummyChatCompletions:
-    def __init__(self, content: str = '{}', error: Exception | None = None):
+    def __init__(
+        self,
+        content: str = '{}',
+        error: Exception | None = None,
+        finish_reason: str | None = None,
+        usage=None,
+    ):
         self.create_calls: list[dict] = []
         self._content = content
         self._error = error
+        self._finish_reason = finish_reason
+        self._usage = usage
 
     async def create(self, **kwargs):
         self.create_calls.append(kwargs)
@@ -23,7 +36,12 @@ class DummyChatCompletions:
             raise self._error
         message = SimpleNamespace(content=self._content)
         choice = SimpleNamespace(message=message)
-        return SimpleNamespace(choices=[choice])
+        if self._finish_reason is not None:
+            choice.finish_reason = self._finish_reason
+        response = SimpleNamespace(choices=[choice])
+        if self._usage is not None:
+            response.usage = self._usage
+        return response
 
 
 class DummyChat:
@@ -47,8 +65,16 @@ def _messages() -> list[Message]:
     ]
 
 
-def _make_client(content: str = '{"foo": "bar"}', error: Exception | None = None, **kwargs):
-    completions = DummyChatCompletions(content=content, error=error)
+def _make_client(
+    content: str = '{"foo": "bar"}',
+    error: Exception | None = None,
+    finish_reason: str | None = None,
+    usage=None,
+    **kwargs,
+):
+    completions = DummyChatCompletions(
+        content=content, error=error, finish_reason=finish_reason, usage=usage
+    )
     client = OpenAIGenericClient(
         config=LLMConfig(api_key='test', model='test-model'),
         client=DummyClient(completions),
@@ -192,3 +218,77 @@ async def test_non_retryable_error_is_not_retried():
         await client.generate_response(_messages(), response_model=ResponseModel)
 
     assert len(completions.create_calls) == 1
+
+
+def _length_usage(completion_tokens: int = 16384, reasoning_tokens: int = 16384):
+    return SimpleNamespace(
+        prompt_tokens=1200,
+        completion_tokens=completion_tokens,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=reasoning_tokens),
+    )
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch):
+    # Keep the real stop/retry policy but skip the exponential backoff sleeps.
+    monkeypatch.setattr(
+        OpenAIGenericClient._generate_response_with_retry.retry,  # type: ignore[attr-defined]
+        'wait',
+        tenacity.wait_none(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_content_with_length_finish_raises_truncated_error_without_retry(
+    no_retry_wait,
+):
+    client, completions = _make_client(
+        content='', finish_reason='length', usage=_length_usage(16384, 16001)
+    )
+
+    with pytest.raises(ResponseTruncatedError) as exc_info:
+        await client.generate_response(_messages(), response_model=ResponseModel)
+
+    assert len(completions.create_calls) == 1
+    message = str(exc_info.value)
+    assert 'finish_reason=length' in message
+    assert 'completion_tokens=16384' in message
+    assert 'reasoning_tokens=16001' in message
+
+
+@pytest.mark.asyncio
+async def test_empty_content_with_stop_finish_stays_plain_empty_response_error():
+    client, _ = _make_client(content='', finish_reason='stop')
+
+    with pytest.raises(EmptyResponseError) as exc_info:
+        await client._generate_response(_messages(), response_model=ResponseModel)
+
+    assert not isinstance(exc_info.value, ResponseTruncatedError)
+
+
+@pytest.mark.asyncio
+async def test_truncated_error_without_usage_still_raised():
+    client, _ = _make_client(content='', finish_reason='length')
+
+    with pytest.raises(ResponseTruncatedError, match='completion_tokens=None'):
+        await client._generate_response(_messages(), response_model=ResponseModel)
+
+
+def test_response_truncated_error_is_not_retryable_but_is_empty_response_error():
+    from graphiti_core.llm_client.client import is_server_or_retry_error
+
+    error = ResponseTruncatedError('truncated')
+    assert isinstance(error, EmptyResponseError)
+    assert is_server_or_retry_error(error) is False
+    assert is_server_or_retry_error(EmptyResponseError('empty')) is True
+
+
+@pytest.mark.asyncio
+async def test_plain_empty_response_is_still_retried_four_times(no_retry_wait):
+    client, completions = _make_client(content='')
+
+    with pytest.raises(EmptyResponseError) as exc_info:
+        await client.generate_response(_messages(), response_model=ResponseModel)
+
+    assert not isinstance(exc_info.value, ResponseTruncatedError)
+    assert len(completions.create_calls) == 4

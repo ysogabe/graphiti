@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from ..prompts.models import Message
 from .client import LLMClient, get_extraction_language_instruction
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
-from .errors import EmptyResponseError, RateLimitError
+from .errors import EmptyResponseError, RateLimitError, ResponseTruncatedError
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +189,17 @@ class OpenAIGenericClient(LLMClient):
             # An empty body (refusal, length finish_reason, or a flaky endpoint) would make
             # json.loads raise a cryptic JSONDecodeError; surface a clear error instead.
             if not result:
+                finish_reason = getattr(response.choices[0], 'finish_reason', None)
+                if finish_reason == 'length':
+                    # The output budget ran out before any content (reasoning tokens count
+                    # toward max_tokens on some backends). Deterministic, so not retried.
+                    details = getattr(usage, 'completion_tokens_details', None)
+                    raise ResponseTruncatedError(
+                        'LLM returned an empty response '
+                        f'(finish_reason={finish_reason}, max_tokens={max_tokens}, '
+                        f'completion_tokens={getattr(usage, "completion_tokens", None)}, '
+                        f'reasoning_tokens={getattr(details, "reasoning_tokens", None)})'
+                    )
                 raise EmptyResponseError('LLM returned an empty response')
             # Many OpenAI-compatible/local models wrap JSON in a ```json fence even under a
             # structured response_format; strip it before parsing.

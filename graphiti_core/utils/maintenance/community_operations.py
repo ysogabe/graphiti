@@ -1,6 +1,7 @@
 import asyncio
+import json
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from graphiti_core.driver.driver import GraphDriver, GraphProvider
 
@@ -15,6 +16,7 @@ from graphiti_core.edges import CommunityEdge
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.helpers import semaphore_gather
 from graphiti_core.llm_client import LLMClient
+from graphiti_core.llm_client.errors import EmptyResponseError
 from graphiti_core.models.nodes.node_db_queries import COMMUNITY_NODE_RETURN
 from graphiti_core.nodes import CommunityNode, EntityNode, get_community_node_from_record
 from graphiti_core.prompts import prompt_library
@@ -24,6 +26,19 @@ from graphiti_core.utils.maintenance.edge_operations import build_community_edge
 from graphiti_core.utils.text_utils import MAX_SUMMARY_CHARS, truncate_at_sentence
 
 MAX_COMMUNITY_BUILD_CONCURRENCY = 10
+
+# Per-summary budget for the shortened-input retry and the deterministic fallback merge.
+RESCUE_SUMMARY_CHARS = MAX_SUMMARY_CHARS // 2
+# Upper bound for a community name derived without the LLM.
+FALLBACK_NAME_CHARS = 200
+
+# Failures that mean "this prompt produced no usable output" (e.g. the output budget was spent
+# on reasoning). Anything else (auth, rate limit, server errors) propagates unchanged.
+_RECOVERABLE_SUMMARY_ERRORS = (EmptyResponseError, json.JSONDecodeError)
+
+# How many times a community summary/name fell back to the non-LLM path, keyed by
+# 'summarize_pair' / 'summary_description'. Read by callers and tests.
+COMMUNITY_SUMMARY_FALLBACKS: Counter[str] = Counter()
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +106,7 @@ async def get_community_clusters(
     return community_clusters
 
 
-async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
+async def _summarize_pair_llm(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
     # Prepare context for LLM
     context = {
         'node_summaries': [{'summary': summary} for summary in summary_pair],
@@ -108,7 +123,35 @@ async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -
     return truncate_at_sentence(pair_summary, MAX_SUMMARY_CHARS)
 
 
-async def generate_summary_description(llm_client: LLMClient, summary: str) -> str:
+async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
+    try:
+        return await _summarize_pair_llm(llm_client, summary_pair)
+    except _RECOVERABLE_SUMMARY_ERRORS as e:
+        first_error: Exception = e
+
+    # Rescue 1: retry once with each input shortened. Skip it when shortening changes nothing,
+    # since the identical prompt would fail the same way.
+    shortened = (
+        truncate_at_sentence(summary_pair[0], RESCUE_SUMMARY_CHARS),
+        truncate_at_sentence(summary_pair[1], RESCUE_SUMMARY_CHARS),
+    )
+    if shortened != summary_pair:
+        try:
+            return await _summarize_pair_llm(llm_client, shortened)
+        except _RECOVERABLE_SUMMARY_ERRORS as e:
+            first_error = e
+
+    # Rescue 2: deterministic merge without the LLM. Each side is capped at half the budget
+    # so a long left summary cannot crowd out the right one.
+    COMMUNITY_SUMMARY_FALLBACKS['summarize_pair'] += 1
+    logger.warning(
+        f'summarize_pair fell back to a deterministic merge after LLM failure: {first_error!r}'
+    )
+    merged = ' '.join(s for s in shortened if s)
+    return truncate_at_sentence(merged, MAX_SUMMARY_CHARS)
+
+
+async def _generate_summary_description_llm(llm_client: LLMClient, summary: str) -> str:
     context = {
         'summary': summary,
     }
@@ -122,6 +165,29 @@ async def generate_summary_description(llm_client: LLMClient, summary: str) -> s
     description = llm_response.get('description', '')
 
     return description
+
+
+async def generate_summary_description(llm_client: LLMClient, summary: str) -> str:
+    try:
+        return await _generate_summary_description_llm(llm_client, summary)
+    except _RECOVERABLE_SUMMARY_ERRORS as e:
+        first_error: Exception = e
+
+    # Rescue 1: retry once with a shortened summary, only if that changes the prompt.
+    shortened = truncate_at_sentence(summary, RESCUE_SUMMARY_CHARS)
+    if shortened != summary:
+        try:
+            return await _generate_summary_description_llm(llm_client, shortened)
+        except _RECOVERABLE_SUMMARY_ERRORS as e:
+            first_error = e
+
+    # Rescue 2: name the community after the leading sentence of its summary.
+    COMMUNITY_SUMMARY_FALLBACKS['summary_description'] += 1
+    logger.warning(
+        'generate_summary_description fell back to a summary prefix after LLM failure: '
+        f'{first_error!r}'
+    )
+    return truncate_at_sentence(summary, FALLBACK_NAME_CHARS)
 
 
 async def build_community(
