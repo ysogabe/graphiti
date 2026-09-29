@@ -13,8 +13,6 @@ logger = logging.getLogger(__name__)
 # Exposed as a module constant so tests can monkeypatch it to avoid real waits.
 RETRY_DELAYS_SECONDS: list[float] = [30, 120, 300]
 
-MAX_ATTEMPTS = len(RETRY_DELAYS_SECONDS) + 1
-
 # Labels of episodes that exhausted all retries, keyed by the label passed to
 # add_episode_task (or None if no label was supplied). Read by tests/operators
 # to see which episodes were dropped, since the old behavior silently discarded them.
@@ -51,22 +49,25 @@ async def _process_with_retry(
     Re-raises the final exception if all attempts are exhausted, or immediately if
     the error isn't retryable (e.g. validation/programming errors).
     """
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    # Read RETRY_DELAYS_SECONDS at call time (not import time) so tests can
+    # monkeypatch it to shorten both the delays and the number of attempts.
+    max_attempts = len(RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, max_attempts + 1):
         try:
             await process_func()
             if attempt > 1:
                 logger.info(
                     f'Episode (label={label}) for group_id {group_id} succeeded '
-                    f'on attempt {attempt}/{MAX_ATTEMPTS}'
+                    f'on attempt {attempt}/{max_attempts}'
                 )
             return
         except Exception as e:
-            if attempt >= MAX_ATTEMPTS or not _is_retryable_error(e):
+            if attempt >= max_attempts or not _is_retryable_error(e):
                 raise
             delay = RETRY_DELAYS_SECONDS[attempt - 1]
             logger.warning(
                 f'Transient error processing episode (label={label}) for group_id {group_id} '
-                f'on attempt {attempt}/{MAX_ATTEMPTS}: {e}. Retrying in {delay}s'
+                f'on attempt {attempt}/{max_attempts}: {e}. Retrying in {delay}s'
             )
             await _sleep(delay)
 
