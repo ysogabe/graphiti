@@ -2,9 +2,15 @@ import asyncio
 import logging
 from collections import defaultdict
 
-from pydantic import BaseModel
-
 from graphiti_core.driver.driver import GraphDriver, GraphProvider
+
+# Single implementation shared with driver/*/operations/graph_ops.py; re-exported here so existing
+# imports from this module keep working.
+from graphiti_core.driver.operations.graph_utils import (  # noqa: F401
+    MAX_LABEL_PROPAGATION_ITERATIONS,
+    Neighbor,
+    label_propagation,
+)
 from graphiti_core.edges import CommunityEdge
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.helpers import semaphore_gather
@@ -18,15 +24,8 @@ from graphiti_core.utils.maintenance.edge_operations import build_community_edge
 from graphiti_core.utils.text_utils import MAX_SUMMARY_CHARS, truncate_at_sentence
 
 MAX_COMMUNITY_BUILD_CONCURRENCY = 10
-# label propagation は振動しうる（重み 2 以上の辺で両端が互いのラベルを取り合う）ため反復上限を持つ
-MAX_LABEL_PROPAGATION_ITERATIONS = 50
 
 logger = logging.getLogger(__name__)
-
-
-class Neighbor(BaseModel):
-    node_uuid: str
-    edge_count: int
 
 
 async def get_community_clusters(
@@ -90,60 +89,6 @@ async def get_community_clusters(
         )
 
     return community_clusters
-
-
-def label_propagation(
-    projection: dict[str, list[Neighbor]],
-    max_iterations: int = MAX_LABEL_PROPAGATION_ITERATIONS,
-) -> list[list[str]]:
-    # Implement the label propagation community detection algorithm.
-    # 1. Start with each node being assigned its own community
-    # 2. Each node will take on the community of the plurality of its neighbors
-    # 3. Ties are broken by going to the largest community
-    # 4. Continue until no communities change during propagation
-    #
-    # Updates are applied **asynchronously** (in place, in a deterministic node order) so a node
-    # already processed in this sweep is visible to the ones after it. With synchronous updates a
-    # single edge of weight >= 2 makes both endpoints adopt each other's label in the same sweep,
-    # swapping labels forever — the loop then never terminates (observed on a real 32-node graph:
-    # 7 nodes kept swapping, burning a core indefinitely). `max_iterations` is the safety valve.
-
-    community_map = {uuid: i for i, uuid in enumerate(projection.keys())}
-
-    for _ in range(max(1, max_iterations)):
-        no_change = True
-
-        for uuid in sorted(projection.keys()):
-            neighbors = projection[uuid]
-            curr_community = community_map[uuid]
-
-            community_candidates: dict[int, int] = defaultdict(int)
-            for neighbor in neighbors:
-                community_candidates[community_map[neighbor.node_uuid]] += neighbor.edge_count
-            community_lst = [
-                (count, community) for community, count in community_candidates.items()
-            ]
-
-            community_lst.sort(reverse=True)
-            candidate_rank, community_candidate = community_lst[0] if community_lst else (0, -1)
-            if community_candidate != -1 and candidate_rank > 1:
-                new_community = community_candidate
-            else:
-                new_community = max(community_candidate, curr_community)
-
-            if new_community != curr_community:
-                community_map[uuid] = new_community
-                no_change = False
-
-        if no_change:
-            break
-
-    community_cluster_map = defaultdict(list)
-    for uuid, community in community_map.items():
-        community_cluster_map[community].append(uuid)
-
-    clusters = [cluster for cluster in community_cluster_map.values()]
-    return clusters
 
 
 async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
