@@ -114,9 +114,11 @@ async def test_json_object_mode_uses_json_object_and_injects_schema():
 
     call = completions.create_calls[0]
     assert call['response_format'] == {'type': 'json_object'}
-    # The schema must be injected into the prompt since the API will not enforce it.
+    # The schema must be injected into the prompt since the API will not enforce it. The
+    # production-hardened wording asks for an *instance* (b.ai models otherwise echo the schema).
     sent_user_content = call['messages'][-1]['content']
-    assert 'Respond with a JSON object in the following format' in sent_user_content
+    assert 'Return ONE JSON object that is an *instance* conforming to this JSON Schema.' in sent_user_content
+    assert 'Top-level keys:' in sent_user_content
     assert json.dumps(ResponseModel.model_json_schema()) in sent_user_content
 
 
@@ -129,7 +131,8 @@ async def test_no_response_model_uses_json_object_without_injection():
     call = completions.create_calls[0]
     assert call['response_format'] == {'type': 'json_object'}
     assert (
-        'Respond with a JSON object in the following format' not in call['messages'][-1]['content']
+        'Return ONE JSON object that is an *instance* conforming to this JSON Schema.'
+        not in call['messages'][-1]['content']
     )
     assert result == {'any': 'thing'}
 
