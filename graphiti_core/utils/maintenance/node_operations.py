@@ -43,7 +43,6 @@ from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.search.search_utils import node_similarity_search
 from graphiti_core.utils.datetime_utils import utc_now
 from graphiti_core.utils.maintenance.attribute_utils import apply_capped_attributes
-from graphiti_core.utils.maintenance.llm_structured import generate_structured
 from graphiti_core.utils.maintenance.dedup_helpers import (
     DedupCandidateIndexes,
     DedupResolutionState,
@@ -52,6 +51,7 @@ from graphiti_core.utils.maintenance.dedup_helpers import (
     _promote_resolved_node,
     _resolve_with_similarity,
 )
+from graphiti_core.utils.maintenance.llm_structured import generate_structured
 from graphiti_core.utils.text_utils import (
     MAX_SUMMARY_CHARS,
     concatenate_episodes,
