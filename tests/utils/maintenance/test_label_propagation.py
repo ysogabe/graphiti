@@ -21,6 +21,8 @@ import logging
 import random
 from collections import defaultdict
 
+import pytest
+
 import graphiti_core.driver.operations.graph_utils as graph_utils
 import graphiti_core.utils.maintenance.community_operations as community_operations
 from graphiti_core.utils.maintenance.community_operations import Neighbor, label_propagation
@@ -242,3 +244,68 @@ def test_partition_independent_of_insertion_order():
         partitions.add(_partition(label_propagation(_projection(edges))))
 
     assert len(partitions) == 1
+
+
+def test_cap_warning_lists_causes_and_diagnostics(caplog):
+    """対称な鎖 n=200 を上限 50 で打ち切ると警告する。原因は断定せず、診断値を含める。"""
+    names = [f'n{i:03d}' for i in range(200)]
+    random.Random(0).shuffle(names)
+    proj = _projection(_chain_of(names, 2))
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        label_propagation(proj, max_iterations=50)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0]
+    assert 'did not converge within 50 sweeps' in message
+    assert 'max_iterations=50' in message
+    assert '200 nodes' in message
+    assert '398 adjacency entries' in message
+    assert 'likely asymmetric' not in message
+    for cause in ('asymmetric adjacency', 'chain-like graph', 'max_iterations set too small'):
+        assert cause in message
+
+
+def test_unknown_neighbor_is_ignored(caplog):
+    """ノード一覧の取得後に追加されたノードが隣接に現れても KeyError にならない（旧実装からの既存バグ）。"""
+    proj = _projection({'a': [('b', 1)]})
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        clusters = label_propagation(proj)
+
+    assert clusters == [['a']]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert 'ignored 1 adjacency entries pointing to 1 uuids' in warnings[0]
+
+
+def test_unknown_neighbor_is_not_counted_as_edge(caplog):
+    """未知 uuid への辺は票に数えない。既知の辺だけで決まった分割と一致する。"""
+    known = {'a': [('b', 2)], 'b': [('a', 2)], 'c': []}
+    with_unknown = {
+        'a': [('b', 2), ('x', 9)],
+        'b': [('a', 2), ('x', 9), ('y', 9)],
+        'c': [('y', 9)],
+    }
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        clusters = label_propagation(_projection(with_unknown))
+
+    assert _partition(clusters) == _partition(label_propagation(_projection(known)))
+    assert any(
+        'ignored 4 adjacency entries pointing to 2 uuids' in r.getMessage() for r in caplog.records
+    )
+
+
+@pytest.mark.parametrize('value', [0, -1, 2.5, 3.0, True, '3'])
+def test_invalid_max_iterations_raises(value):
+    """max_iterations は int >= 1 のみ。黙って 1 に丸めたり切り上げたりしない。"""
+    with pytest.raises(ValueError, match='max_iterations'):
+        label_propagation(_projection({'a': []}), max_iterations=value)
+
+
+def test_positional_call_still_works():
+    """公開シグネチャの後方互換: projection だけを位置引数で渡せる。"""
+    clusters = label_propagation(_projection({'a': [('b', 2)], 'b': [('a', 2)]}))
+    assert _partition(clusters) == _partition([['a', 'b']])

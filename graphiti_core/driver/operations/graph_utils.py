@@ -60,27 +60,70 @@ def label_propagation(
     fire if the last permitted sweep still changed a label but the next one would have confirmed
     convergence.
 
+    For the same reason a neighbor can name a node that is not a key of the projection (it was
+    added to the group after the node list was read). Such neighbors are ignored, i.e. the edge
+    is not counted; a node whose only neighbors are unknown keeps its own community. The number
+    of ignored adjacency entries is logged as a warning.
+
     `max_iterations` defaults to max(MAX_LABEL_PROPAGATION_ITERATIONS, 2 * len(projection)).
-    A fixed cap is wrong because on symmetric inputs the sweeps needed grow linearly with the
-    graph's diameter: a path whose uuids are in random order needs ~n/2 sweeps (n=1000: median
-    374, max 470). The worst observed ratio (20000 random symmetric graphs, adversarial search on
-    n <= 20) is n sweeps, so 2n leaves a 2x margin over that. Each sweep is O(nodes + adjacency
-    entries); the O(n * (n + m)) worst case is only reached on asymmetric input.
+    A fixed cap is wrong because even on symmetric inputs the sweeps needed grow linearly with
+    the graph's diameter: a path with the same weight 2 in both directions whose uuids are in
+    random order needs ~n/2 sweeps (measured: n=10/100/500/1300 -> 5/44/140/581 sweeps; n=1000
+    over many orders: median 374, max 470). The worst observed ratio (20000 random symmetric
+    graphs, adversarial search on n <= 20) is n sweeps, so 2n leaves a 2x margin over that.
+
+    Cost: each sweep is O(n + m) (m = adjacency entries), so the worst case is O(n * (n + m)),
+    and it is reached by symmetric long chains, not only by asymmetric input: a path has
+    m = 2(n - 1) and needs O(n) sweeps, so its total cost is quadratic in n (n=1300 took ~0.9 s
+    in pure Python). Graphs with a small diameter converge in few sweeps: synthetic sparse random
+    graphs of 1300 nodes (the size of a 1.3k-entity group) with 1300/2600/5200 edges converged
+    in 4/6-7/13-17 sweeps (< 0.1 s). With the default cap a run never exceeds max(50, 2n) sweeps.
+
+    `max_iterations` must be an int >= 1 (bool is rejected); anything else raises ValueError.
+    Silently clamping or rounding it hid misconfiguration (0 and -1 used to run one sweep and
+    2.5 three), and every caller in graphiti_core uses the default, so rejecting is safe.
     """
     if max_iterations is None:
         max_iterations = max(MAX_LABEL_PROPAGATION_ITERATIONS, 2 * len(projection))
+    if (
+        not isinstance(max_iterations, int)
+        or isinstance(max_iterations, bool)
+        or max_iterations < 1
+    ):
+        raise ValueError(f'max_iterations must be an int >= 1 or None, got {max_iterations!r}')
 
     community_map = {uuid: i for i, uuid in enumerate(sorted(projection))}
     order = sorted(projection, reverse=True)
 
+    # Drop neighbors that are not in the projection once, instead of on every sweep.
+    adjacency: dict[str, list[Neighbor]] = {}
+    unknown_entries = 0
+    unknown_uuids: set[str] = set()
+    for uuid, neighbors in projection.items():
+        known = [neighbor for neighbor in neighbors if neighbor.node_uuid in community_map]
+        unknown_entries += len(neighbors) - len(known)
+        unknown_uuids.update(
+            neighbor.node_uuid for neighbor in neighbors if neighbor.node_uuid not in community_map
+        )
+        adjacency[uuid] = known
+    edge_entries = sum(len(neighbors) for neighbors in adjacency.values())
+    if unknown_entries:
+        logger.warning(
+            'label_propagation ignored %d adjacency entries pointing to %d uuids that are not '
+            'in the projection (%d nodes); they were probably added while it was being read.',
+            unknown_entries,
+            len(unknown_uuids),
+            len(projection),
+        )
+
     converged = False
     sweeps = 0
-    while sweeps < max(1, max_iterations):
+    while sweeps < max_iterations:
         sweeps += 1
         no_change = True
 
         for uuid in order:
-            neighbors = projection[uuid]
+            neighbors = adjacency[uuid]
             curr_community = community_map[uuid]
 
             community_candidates: dict[int, int] = defaultdict(int)
@@ -107,15 +150,22 @@ def label_propagation(
 
     if converged:
         logger.debug(
-            'label_propagation converged after %d sweeps (%d nodes)', sweeps, len(projection)
+            'label_propagation converged after %d sweeps (%d nodes, %d adjacency entries)',
+            sweeps,
+            len(projection),
+            edge_entries,
         )
     else:
         logger.warning(
-            'label_propagation did not converge within %d sweeps (%d nodes); '
-            'returning an unconverged partition. The projection is likely asymmetric '
-            '(edges changed while it was being read).',
+            'label_propagation did not converge within %d sweeps (max_iterations=%d, '
+            '%d nodes, %d adjacency entries); returning an unconverged partition. '
+            'Possible causes: asymmetric adjacency (edges changed while the projection was '
+            'being read), a large chain-like graph that needs ~n/2 sweeps, or max_iterations '
+            'set too small.',
             sweeps,
+            max_iterations,
             len(projection),
+            edge_entries,
         )
 
     community_cluster_map: dict[int, list[str]] = defaultdict(list)
