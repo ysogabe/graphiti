@@ -121,6 +121,13 @@ def get_fulltext_indices(
                                                 }},
                                                 'name', 'summary', 'group_id'
                                                 )""",
+                # `createNodeIndex` on a label that is already indexed raises "already indexed",
+                # which the driver catches and treats as a no-op (see falkordb_driver.py) — it
+                # does not add `summary` to an existing index that was created before summary
+                # search was added. An environment with an older `Community` index (name/group_id
+                # only) must drop it (`CALL db.idx.fulltext.drop('Community')` on that label's
+                # index) and let this call recreate it so `summary` is included. Keep the same
+                # `stopwords` (and any other options already in use) when recreating by hand.
                 f"""CALL db.idx.fulltext.createNodeIndex(
                                                 {{
                                                     label: 'Community',
@@ -164,6 +171,13 @@ def get_fulltext_indices(
         """CREATE FULLTEXT INDEX node_name_and_summary IF NOT EXISTS
         FOR (n:Entity) ON EACH [n.name, n.summary, n.group_id]"""
         + opts,
+        # `IF NOT EXISTS` only skips creation when an index named `community_name` already
+        # exists; it does not alter an existing index's fields. An environment that already has
+        # a `community_name` index built without `summary` (pre-summary-search) must DROP INDEX
+        # community_name and let this CREATE run again to pick up `summary` — this statement
+        # alone will not backfill it. When doing that by hand, keep the same `analyzer` and
+        # carry over any other options from the existing index (`SHOW INDEXES YIELD options`)
+        # rather than dropping them.
         """CREATE FULLTEXT INDEX community_name IF NOT EXISTS
         FOR (n:Community) ON EACH [n.name, n.summary, n.group_id]"""
         + opts,

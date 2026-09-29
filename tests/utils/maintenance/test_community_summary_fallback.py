@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import tenacity
 
+from graphiti_core.embedder.client import EmbedderClient
 from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.llm_client.errors import EmptyResponseError, ResponseTruncatedError
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
@@ -176,36 +177,91 @@ async def test_build_community_uses_fallback_name_when_only_description_fails():
     assert COMMUNITY_SUMMARY_FALLBACKS['summary_description'] == 1
 
 
+class _NoBatchEmbedder(EmbedderClient):
+    """Mimics an embedder implementation that never overrides `create_batch`, so the base
+    class's `NotImplementedError` is what callers actually see."""
+
+    def __init__(self):
+        self.create_calls: list[list[str]] = []
+
+    async def create(self, input_data: str | list[str]) -> list[float]:
+        self.create_calls.append([input_data] if isinstance(input_data, str) else list(input_data))
+        return [len(self.create_calls) * 1.0]
+
+
 @pytest.mark.asyncio
-async def test_build_communities_generates_summary_embeddings():
+async def test_build_communities_batches_summary_embeddings_when_supported():
     driver = MagicMock()
     llm_client = _llm([])
     embedder = MagicMock()
-    embedder.create = AsyncMock(return_value=[0.1, 0.2])
-    community = CommunityNode(name='Local food', group_id='group-a', summary='Nearby farms.')
+    embedder.create_batch = AsyncMock(return_value=[[0.1, 0.2], [0.3, 0.4]])
+    embedder.create = AsyncMock()
+    communities_built = [
+        CommunityNode(name='Local food', group_id='group-a', summary='Nearby farms.'),
+        CommunityNode(name='Tech meetup', group_id='group-a', summary='Local hackathons.'),
+    ]
 
     with (
         patch.object(
             community_operations,
             'get_community_clusters',
             new_callable=AsyncMock,
-            return_value=[[]],
+            return_value=[[], []],
         ),
         patch.object(
             community_operations,
             'build_community',
             new_callable=AsyncMock,
-            return_value=(community, []),
+            side_effect=[(communities_built[0], []), (communities_built[1], [])],
         ),
     ):
         communities, edges = await build_communities(
             driver, llm_client, ['group-a'], embedder=embedder
         )
 
-    assert communities == [community]
+    assert communities == communities_built
     assert communities[0].summary_embedding == [0.1, 0.2]
+    assert communities[1].summary_embedding == [0.3, 0.4]
     assert edges == []
-    embedder.create.assert_awaited_once_with(input_data=['Nearby farms.'])
+    # Batched: exactly one create_batch call carrying both summaries, and create() untouched.
+    embedder.create_batch.assert_awaited_once_with(['Nearby farms.', 'Local hackathons.'])
+    embedder.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_build_communities_falls_back_to_per_item_create_without_batch_support():
+    driver = MagicMock()
+    llm_client = _llm([])
+    embedder = _NoBatchEmbedder()
+    communities_built = [
+        CommunityNode(name='Local food', group_id='group-a', summary='Nearby farms.'),
+        CommunityNode(name='Tech meetup', group_id='group-a', summary='Local hackathons.'),
+    ]
+
+    with (
+        patch.object(
+            community_operations,
+            'get_community_clusters',
+            new_callable=AsyncMock,
+            return_value=[[], []],
+        ),
+        patch.object(
+            community_operations,
+            'build_community',
+            new_callable=AsyncMock,
+            side_effect=[(communities_built[0], []), (communities_built[1], [])],
+        ),
+    ):
+        communities, edges = await build_communities(
+            driver, llm_client, ['group-a'], embedder=embedder
+        )
+
+    assert communities == communities_built
+    # One create() call per community summary, in place of a single create_batch call.
+    assert sorted(embedder.create_calls) == [['Local hackathons.'], ['Nearby farms.']]
+    embeddings = [c.summary_embedding for c in communities]
+    assert all(e is not None for e in embeddings)
+    assert {e[0] for e in embeddings if e is not None} == {1.0, 2.0}
 
 
 @pytest.mark.asyncio

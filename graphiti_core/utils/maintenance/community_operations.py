@@ -264,6 +264,13 @@ async def build_communities(
     group_ids: list[str] | None,
     embedder: EmbedderClient | None = None,
 ) -> tuple[list[CommunityNode], list[CommunityEdge]]:
+    """Build communities via label propagation and embed their summaries for search.
+
+    Community summary search is wired up for Neo4j and FalkorDB only. Kuzu's `community_name` FTS
+    index covers `name` but not `summary`, and Neptune's AOSS mirror only carries `name`/`uuid`/
+    `group_id` (see `save_to_aoss` in `driver/neptune/operations/community_node_ops.py`) — on
+    those two providers `summary_embedding` is still computed and saved, but unreachable by search.
+    """
     community_clusters = await get_community_clusters(driver, group_ids)
 
     semaphore = asyncio.Semaphore(MAX_COMMUNITY_BUILD_CONCURRENCY)
@@ -285,12 +292,43 @@ async def build_communities(
         community_edges.extend(community[1])
 
     if embedder is not None:
-        await semaphore_gather(
-            *[node.generate_summary_embedding(embedder) for node in community_nodes],
-            max_coroutines=MAX_COMMUNITY_BUILD_CONCURRENCY,
-        )
+        await _embed_community_summaries(embedder, community_nodes)
 
     return community_nodes, community_edges
+
+
+async def _embed_community_summaries(
+    embedder: EmbedderClient, community_nodes: list[CommunityNode]
+) -> None:
+    """Embed every community's summary, batching the embedder call when the client supports it.
+
+    `build_communities` can produce many communities in one run, so a single `create_batch` call
+    is far cheaper than one `create` round trip per community. `EmbedderClient.create_batch`
+    raises `NotImplementedError` unless a concrete client overrides it, so clients that don't
+    support batching fall back to embedding one summary at a time, same as before.
+    """
+    pending: list[tuple[CommunityNode, str]] = []
+    for node in community_nodes:
+        text = node.summary.replace('\n', ' ').strip()
+        if not text:
+            node.summary_embedding = None
+            continue
+        pending.append((node, text))
+
+    if not pending:
+        return
+
+    try:
+        embeddings = await embedder.create_batch([text for _, text in pending])
+    except NotImplementedError:
+        await semaphore_gather(
+            *[node.generate_summary_embedding(embedder) for node, _ in pending],
+            max_coroutines=MAX_COMMUNITY_BUILD_CONCURRENCY,
+        )
+        return
+
+    for (node, _), embedding in zip(pending, embeddings, strict=True):
+        node.summary_embedding = embedding
 
 
 async def remove_communities(driver: GraphDriver, group_ids: list[str] | None = None):
@@ -405,6 +443,8 @@ async def update_community(
 
     community.summary = new_summary
     community.name = new_name
+    # Single-community update (one entity at a time), so there is nothing to batch the way
+    # `_embed_community_summaries` batches embedder calls across many communities.
     await community.generate_summary_embedding(embedder)
 
     community_edges = []
