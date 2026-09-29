@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EntityNode, EpisodeType, SagaNode
+from graphiti_core.search.search_config import SearchConfig
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
 from mcp.server.fastmcp import FastMCP
@@ -26,7 +27,9 @@ from starlette.responses import JSONResponse
 from config.schema import GraphitiConfig, ServerConfig
 from models.response_types import (
     BuildCommunitiesResponse,
+    CommunityHit,
     CommunityResult,
+    CommunitySearchResponse,
     EpisodeEntitiesResponse,
     EpisodeSearchResponse,
     ErrorResponse,
@@ -165,6 +168,8 @@ Core tools:
   valid_at / invalid_at date ranges.
 - summarize_saga: generate or refresh the running summary of a saga's episodes.
 - build_communities: detect entity communities and produce higher-level community summaries.
+- search_communities: search communities by name (hybrid BM25 + embedding); returns summaries and
+  member counts.
 - get_episode_entities: trace provenance — the entities and facts created by specific episode UUIDs.
 - get_entity_edge / get_episodes: retrieve specific facts or episodes.
 - delete_episode: remove an episode and cascade-delete the entities/facts it solely created.
@@ -1172,6 +1177,110 @@ async def build_communities(
         error_msg = str(e)
         logger.error(f'Error building communities: {error_msg}')
         return ErrorResponse(error=f'Error building communities: {error_msg}')
+
+
+def _community_only_search_config(max_communities: int, sim_min_score: float) -> SearchConfig:
+    """Build a SearchConfig that runs the community leg only.
+
+    Starts from COMBINED_HYBRID_SEARCH_RRF's community_config (BM25 + cosine, RRF) and drops
+    the edge / node / episode legs so a community lookup does not pay for them. Deep-copied so
+    the shared recipe is never mutated.
+    """
+    from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_RRF
+
+    search_config = COMBINED_HYBRID_SEARCH_RRF.model_copy(deep=True)
+    if search_config.community_config is None:
+        raise ValueError('COMBINED_HYBRID_SEARCH_RRF has no community_config')
+    search_config.edge_config = None
+    search_config.node_config = None
+    search_config.episode_config = None
+    search_config.limit = max_communities
+    search_config.community_config.sim_min_score = max(0.0, float(sim_min_score))
+    return search_config
+
+
+@mcp.tool()
+async def search_communities(
+    query: str,
+    group_ids: str | list[str] | None = None,
+    max_communities: int = 5,
+    sim_min_score: float = 0.86,
+) -> CommunitySearchResponse | ErrorResponse:
+    """Search community summaries (the higher-level nodes produced by build_communities).
+
+    search_nodes and search_memory_facts only run the node / edge legs, so until this tool no
+    MCP search tool ever returned a Community. This runs the community leg alone — BM25 plus
+    embedding similarity, fused with RRF — and reports how many entities each community has.
+    Both legs match the community *name* only (graphiti-core indexes and embeds the name, not
+    the summary), so a hit depends on the LLM-generated community name.
+
+    NOTE on units: sim_min_score is on the same normalized cosine scale as
+    search_facts_semantic (0.5 = orthogonal, 1.0 = identical, i.e. (1 + cos) / 2). It floors
+    the embedding candidates only; BM25 candidates are not subject to it, so a query that
+    shares words with a community name can still return that community. The returned score
+    is the RRF fusion score (sum of 1/rank over the legs that found the community), not a
+    cosine — use it for ordering, not as an absolute relevance threshold.
+
+    Args:
+        query: The search query
+        group_ids: Optional group ID or list of group IDs to filter results
+        max_communities: Maximum number of communities to return (default 5)
+        sim_min_score: Normalized-cosine floor for the embedding leg (default 0.86)
+    """
+    global graphiti_service
+
+    if graphiti_service is None:
+        return ErrorResponse(error='Graphiti service not initialized')
+
+    try:
+        if max_communities <= 0:
+            return ErrorResponse(error='max_communities must be a positive integer')
+
+        client = await graphiti_service.get_client()
+        effective_group_ids = coerce_group_ids(group_ids)
+        if effective_group_ids is None:
+            effective_group_ids = [config.graphiti.group_id] if config.graphiti.group_id else []
+
+        search_config = _community_only_search_config(max_communities, sim_min_score)
+        results = await client.search_(
+            query=query, config=search_config, group_ids=effective_group_ids
+        )
+        communities = results.communities
+        scores: list[float | None] = list(results.community_reranker_scores)
+        if len(scores) != len(communities):
+            scores = [None] * len(communities)
+        pairs = list(zip(communities, scores, strict=True))
+        if not pairs:
+            return CommunitySearchResponse(message='No relevant communities found', communities=[])
+
+        # One round trip for every returned community; a community with no members yields no row.
+        records, _, _ = await client.driver.execute_query(
+            'MATCH (c:Community)-[:HAS_MEMBER]->(m:Entity)'
+            ' WHERE c.uuid IN $uuids'
+            ' RETURN c.uuid AS uuid, count(DISTINCT m) AS members',
+            uuids=[c.uuid for c, _ in pairs],
+            routing_='r',
+        )
+        member_counts = {dict(r)['uuid']: int(dict(r)['members']) for r in records}
+
+        hits: list[CommunityHit] = [
+            CommunityHit(
+                uuid=community.uuid,
+                name=community.name,
+                group_id=community.group_id,
+                summary=getattr(community, 'summary', None),
+                members=member_counts.get(community.uuid, 0),
+                score=round(float(score), 4) if score is not None else None,
+            )
+            for community, score in pairs
+        ]
+        return CommunitySearchResponse(
+            message='Communities retrieved successfully', communities=hits
+        )
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f'Error searching communities: {error_msg}')
+        return ErrorResponse(error=f'Error searching communities: {error_msg}')
 
 
 @mcp.tool()

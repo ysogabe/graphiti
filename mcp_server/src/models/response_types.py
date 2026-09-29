@@ -70,6 +70,21 @@ class BuildCommunitiesResponse(TypedDict):
     communities: list[CommunityResult]
 
 
+class CommunityHit(TypedDict):
+    uuid: str
+    name: str
+    group_id: str
+    summary: str | None
+    members: int
+    # RRF fusion score of the community leg (not a cosine); None if scores were unavailable.
+    score: float | None
+
+
+class CommunitySearchResponse(TypedDict):
+    message: str
+    communities: list[CommunityHit]
+
+
 class EdgeResult(TypedDict):
     uuid: str
     name: str
