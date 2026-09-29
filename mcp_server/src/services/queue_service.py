@@ -1,12 +1,74 @@
 """Queue service for managing episode processing."""
 
 import asyncio
+import collections
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Backoff schedule (seconds) for transient-error retries: initial attempt + 3 retries.
+# Exposed as a module constant so tests can monkeypatch it to avoid real waits.
+RETRY_DELAYS_SECONDS: list[float] = [30, 120, 300]
+
+MAX_ATTEMPTS = len(RETRY_DELAYS_SECONDS) + 1
+
+# Labels of episodes that exhausted all retries, keyed by the label passed to
+# add_episode_task (or None if no label was supplied). Read by tests/operators
+# to see which episodes were dropped, since the old behavior silently discarded them.
+FAILED_EPISODES: collections.Counter = collections.Counter()
+
+# Exception class names (matched by name, not isinstance, so we don't need a hard
+# dependency on e.g. neo4j.exceptions across every graph backend) treated as transient.
+_RETRYABLE_EXCEPTION_NAMES = ('TimeoutError', 'ConnectionError', 'ServiceUnavailable')
+_RETRYABLE_MESSAGE_MARKERS = ('429', 'RESOURCE_EXHAUSTED', 'rate limit')
+
+
+async def _sleep(seconds: float) -> None:
+    """Wait between retry attempts. A module-level indirection so tests can monkeypatch it."""
+    await asyncio.sleep(seconds)
+
+
+def _is_retryable_error(exc: BaseException) -> bool:
+    """Return True for transient errors (rate limits, connection issues) worth retrying."""
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    if type(exc).__name__ in _RETRYABLE_EXCEPTION_NAMES:
+        return True
+    message = str(exc)
+    return any(marker.lower() in message.lower() for marker in _RETRYABLE_MESSAGE_MARKERS)
+
+
+async def _process_with_retry(
+    process_func: Callable[[], Awaitable[None]],
+    label: str | None,
+    group_id: str,
+) -> None:
+    """Run process_func, retrying transient errors with exponential backoff.
+
+    Re-raises the final exception if all attempts are exhausted, or immediately if
+    the error isn't retryable (e.g. validation/programming errors).
+    """
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            await process_func()
+            if attempt > 1:
+                logger.info(
+                    f'Episode (label={label}) for group_id {group_id} succeeded '
+                    f'on attempt {attempt}/{MAX_ATTEMPTS}'
+                )
+            return
+        except Exception as e:
+            if attempt >= MAX_ATTEMPTS or not _is_retryable_error(e):
+                raise
+            delay = RETRY_DELAYS_SECONDS[attempt - 1]
+            logger.warning(
+                f'Transient error processing episode (label={label}) for group_id {group_id} '
+                f'on attempt {attempt}/{MAX_ATTEMPTS}: {e}. Retrying in {delay}s'
+            )
+            await _sleep(delay)
 
 
 class QueueService:
@@ -22,13 +84,19 @@ class QueueService:
         self._graphiti_client: Any = None
 
     async def add_episode_task(
-        self, group_id: str, process_func: Callable[[], Awaitable[None]]
+        self,
+        group_id: str,
+        process_func: Callable[[], Awaitable[None]],
+        label: str | None = None,
     ) -> int:
         """Add an episode processing task to the queue.
 
         Args:
             group_id: The group ID for the episode
             process_func: The async function to process the episode
+            label: Optional human-readable label (e.g. episode name) used in logs
+                and in FAILED_EPISODES if processing ultimately fails. Defaults to
+                None, matching the previous unlabeled behavior.
 
         Returns:
             The position in the queue
@@ -37,8 +105,8 @@ class QueueService:
         if group_id not in self._episode_queues:
             self._episode_queues[group_id] = asyncio.Queue()
 
-        # Add the episode processing function to the queue
-        await self._episode_queues[group_id].put(process_func)
+        # Add the episode processing function (and its label) to the queue
+        await self._episode_queues[group_id].put((process_func, label))
 
         # Start a worker for this queue if one isn't already running
         if not self._queue_workers.get(group_id, False):
@@ -57,17 +125,19 @@ class QueueService:
 
         try:
             while True:
-                # Get the next episode processing function from the queue
+                # Get the next episode processing function (and its label) from the queue
                 # This will wait if the queue is empty
-                process_func = await self._episode_queues[group_id].get()
+                process_func, label = await self._episode_queues[group_id].get()
 
                 try:
-                    # Process the episode
-                    await process_func()
+                    # Process the episode, retrying transient errors
+                    await _process_with_retry(process_func, label, group_id)
                 except Exception as e:
                     logger.error(
-                        f'Error processing queued episode for group_id {group_id}: {str(e)}'
+                        f'Error processing queued episode for group_id {group_id} '
+                        f'(label={label}): {str(e)}'
                     )
+                    FAILED_EPISODES[label] += 1
                 finally:
                     # Mark the task as done regardless of success/failure
                     self._episode_queues[group_id].task_done()
@@ -181,4 +251,4 @@ class QueueService:
                 raise
 
         # Use the existing add_episode_task method to queue the processing
-        return await self.add_episode_task(group_id, process_episode)
+        return await self.add_episode_task(group_id, process_episode, label=f'{name} ({group_id})')
