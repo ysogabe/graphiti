@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from ..prompts.models import Message
 from .client import LLMClient, get_extraction_language_instruction
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
-from .errors import EmptyResponseError, RateLimitError, ResponseTruncatedError
+from .errors import EmptyResponseError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,31 @@ class OpenAIGenericClient(LLMClient):
             stripped = re.sub(r'\r?\n?```[ \t]*$', '', stripped)
         return stripped.strip()
 
+    @staticmethod
+    def _extract_json_payload(text: str) -> typing.Any:
+        """Parse the first JSON value in ``text``, tolerating prose and trailing junk.
+
+        Several OpenAI-compatible providers (b.ai's glm/deepseek lines among them) honour
+        ``response_format`` only loosely: they answer with a valid object followed by commentary,
+        a second object, or a ``{"answer": {...}}`` wrapper. A bare ``json.loads`` then raises
+        ``Extra data: line N column M`` and the whole episode is dropped, so recover the first
+        decodable value instead of failing the ingest.
+        """
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            starts = [i for i in (text.find('{'), text.find('[')) if i != -1]
+            if not starts:
+                raise
+            parsed, _end = json.JSONDecoder().raw_decode(text[min(starts) :])
+        if isinstance(parsed, dict) and len(parsed) == 1:
+            key, only = next(iter(parsed.items()))
+            if key in ('answer', 'response', 'result', 'output', 'data', 'json') and isinstance(
+                only, (dict, list)
+            ):
+                return only
+        return parsed
+
     async def _generate_response(
         self,
         messages: list[Message],
@@ -189,21 +214,11 @@ class OpenAIGenericClient(LLMClient):
             # An empty body (refusal, length finish_reason, or a flaky endpoint) would make
             # json.loads raise a cryptic JSONDecodeError; surface a clear error instead.
             if not result:
-                finish_reason = getattr(response.choices[0], 'finish_reason', None)
-                if finish_reason == 'length':
-                    # The output budget ran out before any content (reasoning tokens count
-                    # toward max_tokens on some backends). Deterministic, so not retried.
-                    details = getattr(usage, 'completion_tokens_details', None)
-                    raise ResponseTruncatedError(
-                        'LLM returned an empty response '
-                        f'(finish_reason={finish_reason}, max_tokens={max_tokens}, '
-                        f'completion_tokens={getattr(usage, "completion_tokens", None)}, '
-                        f'reasoning_tokens={getattr(details, "reasoning_tokens", None)})'
-                    )
                 raise EmptyResponseError('LLM returned an empty response')
             # Many OpenAI-compatible/local models wrap JSON in a ```json fence even under a
-            # structured response_format; strip it before parsing.
-            return json.loads(self._strip_code_fences(result))
+            # structured response_format; strip it, then take the first decodable JSON value
+            # (prose or a trailing second object after it is common on b.ai).
+            return self._extract_json_payload(self._strip_code_fences(result))
         except openai.RateLimitError as e:
             raise RateLimitError from e
         except Exception as e:
@@ -230,10 +245,15 @@ class OpenAIGenericClient(LLMClient):
         # response_format, so no prompt injection is needed.
         if response_model is not None and self.structured_output_mode == 'json_object':
             serialized_model = json.dumps(response_model.model_json_schema())
+            keys = ', '.join(sorted(response_model.model_fields))
             messages[
                 -1
             ].content += (
-                f'\n\nRespond with a JSON object in the following format:\n\n{serialized_model}'
+                '\n\nReturn ONE JSON object that is an *instance* conforming to this JSON Schema.'
+                ' Do not return the schema definition itself.'
+                f' Top-level keys: {keys}. Include every one of them; use [] for empty lists'
+                ' instead of omitting a key. Output only that JSON object, with no commentary'
+                f' before or after it.\n\n{serialized_model}'
             )
 
         # Add multilingual extraction instructions
