@@ -9,6 +9,7 @@ server:
 llm:
   provider: openai
   model: ${MODEL_NAME:glm-5.3-flash}
+  max_tokens: ${LLM_MAX_TOKENS:32768}
   reasoning_effort: ${LLM_REASONING_EFFORT:high}   # glm rejects medium/off (400)
   structured_output_mode: ${LLM_STRUCTURED_OUTPUT_MODE:json_object}
   providers:
