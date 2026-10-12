@@ -107,34 +107,22 @@ def get_fulltext_indices(
         return cast(
             list[LiteralString],
             [
-                f"""CALL db.idx.fulltext.createNodeIndex(
-                                                {{
-                                                    label: 'Episodic',
-                                                    stopwords: {stopwords_str}
-                                                }},
-                                                'content', 'source', 'source_description', 'group_id'
-                                                )""",
-                f"""CALL db.idx.fulltext.createNodeIndex(
-                                                {{
-                                                    label: 'Entity',
-                                                    stopwords: {stopwords_str}
-                                                }},
-                                                'name', 'summary', 'group_id'
-                                                )""",
-                # `createNodeIndex` on a label that is already indexed raises "already indexed",
-                # which the driver catches and treats as a no-op (see falkordb_driver.py) — it
-                # does not add `summary` to an existing index that was created before summary
-                # search was added. An environment with an older `Community` index (name/group_id
-                # only) must drop it (`CALL db.idx.fulltext.drop('Community')` on that label's
-                # index) and let this call recreate it so `summary` is included. Keep the same
-                # `stopwords` (and any other options already in use) when recreating by hand.
-                f"""CALL db.idx.fulltext.createNodeIndex(
-                                                {{
-                                                    label: 'Community',
-                                                    stopwords: {stopwords_str}
-                                                }},
-                                                'name', 'summary', 'group_id'
-                                                )""",
+                f"""CREATE FULLTEXT INDEX FOR (n:Episodic)
+                ON (n.content, n.source, n.source_description, n.group_id)
+                OPTIONS {{stopwords: {stopwords_str}}}""",
+                f"""CREATE FULLTEXT INDEX FOR (n:Entity)
+                ON (n.name, n.summary, n.group_id)
+                OPTIONS {{stopwords: {stopwords_str}}}""",
+                # Creating a full-text index on a label that is already indexed raises "already
+                # indexed", which the driver treats as a no-op (see falkordb_driver.py) — it does
+                # not add `summary` to an existing index that was created before summary search
+                # was added. An environment with an older `Community` index (name/group_id only)
+                # must drop it (`CALL db.idx.fulltext.drop('Community')`) and let this statement
+                # recreate it so `summary` is included. Keep the same `stopwords` (and any other
+                # options already in use) when recreating by hand.
+                f"""CREATE FULLTEXT INDEX FOR (n:Community)
+                ON (n.name, n.summary, n.group_id)
+                OPTIONS {{stopwords: {stopwords_str}}}""",
                 """CREATE FULLTEXT INDEX FOR ()-[e:RELATES_TO]-() ON (e.name, e.fact, e.group_id)""",
             ],
         )

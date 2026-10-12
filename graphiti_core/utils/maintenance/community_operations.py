@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 from collections import Counter, defaultdict
@@ -14,6 +13,7 @@ from graphiti_core.driver.operations.graph_utils import (  # noqa: F401
 )
 from graphiti_core.edges import CommunityEdge
 from graphiti_core.embedder import EmbedderClient
+from graphiti_core.graphiti_types import GraphitiClients, generate_prompt_response
 from graphiti_core.helpers import semaphore_gather
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.errors import EmptyResponseError
@@ -44,7 +44,9 @@ logger = logging.getLogger(__name__)
 
 
 async def get_community_clusters(
-    driver: GraphDriver, group_ids: list[str] | None
+    driver: GraphDriver,
+    group_ids: list[str] | None,
+    max_coroutines: int | None = None,
 ) -> list[list[EntityNode]]:
     if driver.graph_operations_interface:
         try:
@@ -98,7 +100,8 @@ async def get_community_clusters(
         community_clusters.extend(
             list(
                 await semaphore_gather(
-                    *[EntityNode.get_by_uuids(driver, cluster) for cluster in cluster_uuids]
+                    *[EntityNode.get_by_uuids(driver, cluster) for cluster in cluster_uuids],
+                    max_coroutines=max_coroutines,
                 )
             )
         )
@@ -106,16 +109,24 @@ async def get_community_clusters(
     return community_clusters
 
 
-async def _summarize_pair_llm(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
+async def _summarize_pair_llm(
+    llm_client: LLMClient,
+    summary_pair: tuple[str, str],
+    *,
+    clients: GraphitiClients | None = None,
+) -> str:
     # Prepare context for LLM
     context = {
         'node_summaries': [{'summary': summary} for summary in summary_pair],
     }
 
-    llm_response = await llm_client.generate_response(
-        prompt_library.summarize_nodes.summarize_pair(context),
+    llm_response = await generate_prompt_response(
+        llm_client,
+        'summarize_nodes.summarize_pair',
+        prompt_library.summarize_nodes.summarize_pair,
+        context,
+        clients=clients,
         response_model=Summary,
-        prompt_name='summarize_nodes.summarize_pair',
     )
 
     pair_summary = llm_response.get('summary', '')
@@ -138,15 +149,22 @@ def _merge_summaries_deterministically(summary_pair: tuple[str, str]) -> str:
     return f'{left} {right}'.strip() if right else left
 
 
-async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
+async def summarize_pair(
+    llm_client: LLMClient,
+    summary_pair: tuple[str, str],
+    *,
+    clients: GraphitiClients | None = None,
+) -> str:
     """Merge two summaries, surviving an exhausted LLM output budget.
+
+    clients: optional bundle that selects prompt overrides and model routes.
 
     At most 2 ``generate_response`` calls are made (the original prompt, then one retry with
     shortened inputs); each call retries internally up to 4 attempts, so this issues at most
     8 LLM requests before falling back to a deterministic merge.
     """
     try:
-        return await _summarize_pair_llm(llm_client, summary_pair)
+        return await _summarize_pair_llm(llm_client, summary_pair, clients=clients)
     except _RECOVERABLE_SUMMARY_ERRORS as e:
         first_error: Exception = e
 
@@ -158,7 +176,7 @@ async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -
     )
     if shortened != summary_pair:
         try:
-            return await _summarize_pair_llm(llm_client, shortened)
+            return await _summarize_pair_llm(llm_client, shortened, clients=clients)
         except _RECOVERABLE_SUMMARY_ERRORS as e:
             first_error = e
 
@@ -171,15 +189,23 @@ async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -
     return _merge_summaries_deterministically(summary_pair)
 
 
-async def _generate_summary_description_llm(llm_client: LLMClient, summary: str) -> str:
+async def _generate_summary_description_llm(
+    llm_client: LLMClient,
+    summary: str,
+    *,
+    clients: GraphitiClients | None = None,
+) -> str:
     context = {
         'summary': summary,
     }
 
-    llm_response = await llm_client.generate_response(
-        prompt_library.summarize_nodes.summary_description(context),
+    llm_response = await generate_prompt_response(
+        llm_client,
+        'summarize_nodes.summary_description',
+        prompt_library.summarize_nodes.summary_description,
+        context,
+        clients=clients,
         response_model=SummaryDescription,
-        prompt_name='summarize_nodes.summary_description',
     )
 
     description = llm_response.get('description', '')
@@ -187,15 +213,22 @@ async def _generate_summary_description_llm(llm_client: LLMClient, summary: str)
     return description
 
 
-async def generate_summary_description(llm_client: LLMClient, summary: str) -> str:
+async def generate_summary_description(
+    llm_client: LLMClient,
+    summary: str,
+    *,
+    clients: GraphitiClients | None = None,
+) -> str:
     """Name a community from its summary, surviving an exhausted LLM output budget.
+
+    clients: optional bundle that selects prompt overrides and model routes.
 
     At most 2 ``generate_response`` calls are made (the original prompt, then one retry with a
     shortened summary); each call retries internally up to 4 attempts, so this issues at most
     8 LLM requests before falling back to the summary's leading sentence.
     """
     try:
-        return await _generate_summary_description_llm(llm_client, summary)
+        return await _generate_summary_description_llm(llm_client, summary, clients=clients)
     except _RECOVERABLE_SUMMARY_ERRORS as e:
         first_error: Exception = e
 
@@ -203,7 +236,7 @@ async def generate_summary_description(llm_client: LLMClient, summary: str) -> s
     shortened = truncate_at_sentence(summary, RESCUE_SUMMARY_CHARS)
     if shortened != summary:
         try:
-            return await _generate_summary_description_llm(llm_client, shortened)
+            return await _generate_summary_description_llm(llm_client, shortened, clients=clients)
         except _RECOVERABLE_SUMMARY_ERRORS as e:
             first_error = e
 
@@ -217,8 +250,16 @@ async def generate_summary_description(llm_client: LLMClient, summary: str) -> s
 
 
 async def build_community(
-    llm_client: LLMClient, community_cluster: list[EntityNode]
+    llm_client: LLMClient,
+    community_cluster: list[EntityNode],
+    *,
+    clients: GraphitiClients | None = None,
+    max_coroutines: int | None = None,
 ) -> tuple[CommunityNode, list[CommunityEdge]]:
+    """Build one community from its nodes.
+
+    clients: optional bundle that selects prompt overrides and model routes.
+    """
     summaries = [entity.summary for entity in community_cluster]
     length = len(summaries)
     while length > 1:
@@ -229,11 +270,16 @@ async def build_community(
         new_summaries: list[str] = list(
             await semaphore_gather(
                 *[
-                    summarize_pair(llm_client, (str(left_summary), str(right_summary)))
+                    summarize_pair(
+                        llm_client,
+                        (str(left_summary), str(right_summary)),
+                        clients=clients,
+                    )
                     for left_summary, right_summary in zip(
                         summaries[: int(length / 2)], summaries[int(length / 2) :], strict=False
                     )
-                ]
+                ],
+                max_coroutines=max_coroutines,
             )
         )
         if odd_one_out is not None:
@@ -242,7 +288,7 @@ async def build_community(
         length = len(summaries)
 
     summary = truncate_at_sentence(summaries[0], MAX_SUMMARY_CHARS)
-    name = await generate_summary_description(llm_client, summary)
+    name = await generate_summary_description(llm_client, summary, clients=clients)
     now = utc_now()
     community_node = CommunityNode(
         name=name,
@@ -262,26 +308,41 @@ async def build_communities(
     driver: GraphDriver,
     llm_client: LLMClient,
     group_ids: list[str] | None,
+    *,
+    clients: GraphitiClients | None = None,
+    max_coroutines: int | None = None,
     embedder: EmbedderClient | None = None,
 ) -> tuple[list[CommunityNode], list[CommunityEdge]]:
-    """Build communities via label propagation and embed their summaries for search.
+    """Build communities via label propagation and, given an embedder, embed their summaries.
 
     Community summary search is wired up for Neo4j and FalkorDB only. Kuzu's `community_name` FTS
     index covers `name` but not `summary`, and Neptune's AOSS mirror only carries `name`/`uuid`/
     `group_id` (see `save_to_aoss` in `driver/neptune/operations/community_node_ops.py`) — on
     those two providers `summary_embedding` is still computed and saved, but unreachable by search.
+
+    clients: optional bundle that selects prompt overrides and model routes.
     """
-    community_clusters = await get_community_clusters(driver, group_ids)
+    community_clusters = await get_community_clusters(
+        driver, group_ids, max_coroutines=max_coroutines
+    )
 
-    semaphore = asyncio.Semaphore(MAX_COMMUNITY_BUILD_CONCURRENCY)
-
-    async def limited_build_community(cluster):
-        async with semaphore:
-            return await build_community(llm_client, cluster)
-
+    # Honour the per-instance `max_coroutines` cap when set; otherwise fall back to the
+    # historical built-in cap of `MAX_COMMUNITY_BUILD_CONCURRENCY` to preserve behavior.
+    # We let `semaphore_gather` enforce the cap directly rather than wrapping each
+    # coroutine in a redundant `asyncio.Semaphore` — both mechanisms would bound the
+    # same fan-out at the same value, and the inner cap obscures the precedence.
     communities: list[tuple[CommunityNode, list[CommunityEdge]]] = list(
         await semaphore_gather(
-            *[limited_build_community(cluster) for cluster in community_clusters]
+            *[
+                build_community(
+                    llm_client,
+                    cluster,
+                    clients=clients,
+                    max_coroutines=max_coroutines,
+                )
+                for cluster in community_clusters
+            ],
+            max_coroutines=max_coroutines or MAX_COMMUNITY_BUILD_CONCURRENCY,
         )
     )
 
@@ -432,14 +493,24 @@ async def update_community(
     llm_client: LLMClient,
     embedder: EmbedderClient,
     entity: EntityNode,
+    *,
+    clients: GraphitiClients | None = None,
 ) -> tuple[list[CommunityNode], list[CommunityEdge]]:
+    """Update the community that contains an entity.
+
+    clients: optional bundle that selects prompt overrides and model routes.
+    """
     community, is_new = await determine_entity_community(driver, entity)
 
     if community is None:
         return [], []
 
-    new_summary = await summarize_pair(llm_client, (entity.summary, community.summary))
-    new_name = await generate_summary_description(llm_client, new_summary)
+    new_summary = await summarize_pair(
+        llm_client,
+        (entity.summary, community.summary),
+        clients=clients,
+    )
+    new_name = await generate_summary_description(llm_client, new_summary, clients=clients)
 
     community.summary = new_summary
     community.name = new_name

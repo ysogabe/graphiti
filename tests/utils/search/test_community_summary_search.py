@@ -24,10 +24,10 @@ def test_community_fulltext_indices_include_summary_without_renaming_index():
 
     falkordb_indices = get_fulltext_indices(GraphProvider.FALKORDB)
     falkordb_community_index = next(
-        index for index in falkordb_indices if "label: 'Community'" in index
+        index for index in falkordb_indices if 'FOR (n:Community)' in index
     )
 
-    assert "'name', 'summary', 'group_id'" in falkordb_community_index
+    assert 'ON (n.name, n.summary, n.group_id)' in falkordb_community_index
 
 
 @pytest.mark.parametrize(

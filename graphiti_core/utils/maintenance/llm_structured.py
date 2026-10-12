@@ -16,13 +16,17 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from pydantic import BaseModel
 
+from ...graphiti_types import uses_prompt_routing
 from ...llm_client.client import LLMClient
 from ...llm_client.config import ModelSize
 from ...prompts.models import Message
+
+if TYPE_CHECKING:
+    from ...graphiti_types import GraphitiClients
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +66,8 @@ async def generate_structured(
     model_size: ModelSize = ModelSize.small,
     prompt_name: str,
     fallback: Callable[[], ModelT] | None = None,
+    clients: GraphitiClients | None = None,
+    context: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> ModelT:
     """Return a validated `response_model`, retrying once, then failing open if allowed.
@@ -69,19 +75,35 @@ async def generate_structured(
     `fallback` decides what "open" means for the caller (e.g. `EdgeDuplicate()` = no merge and no
     invalidation). When it is None the last error is re-raised, so callers whose empty result
     would lose content keep the strict behaviour.
+
+    When `clients` carries prompt routing (an `LLMRuntime` or a prompt library) and `context` is
+    given, each attempt goes through `clients.complete_prompt` so prompt overrides and model routes
+    apply; the routed prompt is built from `context`, so the retry repeats it without the
+    correction message. Otherwise `messages` is sent straight to `llm_client`.
     """
+    routed = context is not None and uses_prompt_routing(clients)
     attempt_messages = messages
     last_error: Exception | None = None
 
     for attempt in (1, 2):
         try:
-            raw = await llm_client.generate_response(
-                attempt_messages,
-                response_model=response_model,
-                model_size=model_size,
-                prompt_name=prompt_name,
-                **kwargs,
-            )
+            if routed:
+                assert clients is not None and context is not None
+                raw = await clients.complete_prompt(
+                    prompt_name,  # type: ignore[arg-type]
+                    context,
+                    response_model=response_model,
+                    model_size=model_size,
+                    **kwargs,
+                )
+            else:
+                raw = await llm_client.generate_response(
+                    attempt_messages,
+                    response_model=response_model,
+                    model_size=model_size,
+                    prompt_name=prompt_name,
+                    **kwargs,
+                )
             return response_model.model_validate(raw)
         except Exception as e:  # noqa: BLE001 - any failure here is a shape/transport problem
             last_error = e
