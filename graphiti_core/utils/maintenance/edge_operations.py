@@ -44,6 +44,7 @@ from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.datetime_utils import ensure_utc, utc_now
 from graphiti_core.utils.maintenance.attribute_utils import apply_capped_attributes
 from graphiti_core.utils.maintenance.dedup_helpers import _normalize_string_exact
+from graphiti_core.utils.maintenance.llm_structured import generate_structured
 from graphiti_core.utils.text_utils import concatenate_episodes
 
 logger = logging.getLogger(__name__)
@@ -723,13 +724,17 @@ async def resolve_extracted_edge(
             else '',
         )
 
-    llm_response = await llm_client.generate_response(
+    llm_response = await generate_structured(
+        llm_client,
         prompt_library.dedupe_edges.resolve_edge(context),
-        response_model=EdgeDuplicate,
+        EdgeDuplicate,
         model_size=ModelSize.small,
         prompt_name='dedupe_edges.resolve_edge',
+        # Fail open: no duplicate idx, no contradiction idx. The extracted edge is still
+        # persisted, which is strictly better than dropping the whole episode.
+        fallback=EdgeDuplicate,
     )
-    response_object = EdgeDuplicate(**llm_response)
+    response_object = llm_response
     duplicate_facts = response_object.duplicate_facts
 
     # Validate duplicate_facts are in valid range for EXISTING FACTS

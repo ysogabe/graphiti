@@ -515,7 +515,9 @@ class Neo4jSearchOperations(SearchOperations):
             WITH c,
             """
             + get_vector_cosine_func_query(
-                'c.name_embedding', '$search_vector', GraphProvider.NEO4J
+                'coalesce(c.summary_embedding, c.name_embedding)',
+                '$search_vector',
+                GraphProvider.NEO4J,
             )
             + """ AS score
             WHERE score > $min_score

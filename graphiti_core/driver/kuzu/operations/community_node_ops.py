@@ -45,6 +45,7 @@ class KuzuCommunityNodeOperations(CommunityNodeOperations):
             'group_id': node.group_id,
             'summary': node.summary,
             'name_embedding': node.name_embedding,
+            'summary_embedding': node.summary_embedding,
             'created_at': node.created_at,
         }
         if tx is not None:

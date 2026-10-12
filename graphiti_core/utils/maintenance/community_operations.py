@@ -1,14 +1,22 @@
 import asyncio
+import json
 import logging
-from collections import defaultdict
-
-from pydantic import BaseModel
+from collections import Counter, defaultdict
 
 from graphiti_core.driver.driver import GraphDriver, GraphProvider
+
+# Single implementation shared with driver/*/operations/graph_ops.py; re-exported here so existing
+# imports from this module keep working.
+from graphiti_core.driver.operations.graph_utils import (  # noqa: F401
+    MAX_LABEL_PROPAGATION_ITERATIONS,
+    Neighbor,
+    label_propagation,
+)
 from graphiti_core.edges import CommunityEdge
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.helpers import semaphore_gather
 from graphiti_core.llm_client import LLMClient
+from graphiti_core.llm_client.errors import EmptyResponseError
 from graphiti_core.models.nodes.node_db_queries import COMMUNITY_NODE_RETURN
 from graphiti_core.nodes import CommunityNode, EntityNode, get_community_node_from_record
 from graphiti_core.prompts import prompt_library
@@ -19,12 +27,20 @@ from graphiti_core.utils.text_utils import MAX_SUMMARY_CHARS, truncate_at_senten
 
 MAX_COMMUNITY_BUILD_CONCURRENCY = 10
 
+# Per-summary budget for the shortened-input retry and the deterministic fallback merge.
+RESCUE_SUMMARY_CHARS = MAX_SUMMARY_CHARS // 2
+# Upper bound for a community name derived without the LLM.
+FALLBACK_NAME_CHARS = 200
+
+# Failures that mean "this prompt produced no usable output" (e.g. the output budget was spent
+# on reasoning). Anything else (auth, rate limit, server errors) propagates unchanged.
+_RECOVERABLE_SUMMARY_ERRORS = (EmptyResponseError, json.JSONDecodeError)
+
+# How many times a community summary/name fell back to the non-LLM path, keyed by
+# 'summarize_pair' / 'summary_description'. Read by callers and tests.
+COMMUNITY_SUMMARY_FALLBACKS: Counter[str] = Counter()
+
 logger = logging.getLogger(__name__)
-
-
-class Neighbor(BaseModel):
-    node_uuid: str
-    edge_count: int
 
 
 async def get_community_clusters(
@@ -90,55 +106,7 @@ async def get_community_clusters(
     return community_clusters
 
 
-def label_propagation(projection: dict[str, list[Neighbor]]) -> list[list[str]]:
-    # Implement the label propagation community detection algorithm.
-    # 1. Start with each node being assigned its own community
-    # 2. Each node will take on the community of the plurality of its neighbors
-    # 3. Ties are broken by going to the largest community
-    # 4. Continue until no communities change during propagation
-
-    community_map = {uuid: i for i, uuid in enumerate(projection.keys())}
-
-    while True:
-        no_change = True
-        new_community_map: dict[str, int] = {}
-
-        for uuid, neighbors in projection.items():
-            curr_community = community_map[uuid]
-
-            community_candidates: dict[int, int] = defaultdict(int)
-            for neighbor in neighbors:
-                community_candidates[community_map[neighbor.node_uuid]] += neighbor.edge_count
-            community_lst = [
-                (count, community) for community, count in community_candidates.items()
-            ]
-
-            community_lst.sort(reverse=True)
-            candidate_rank, community_candidate = community_lst[0] if community_lst else (0, -1)
-            if community_candidate != -1 and candidate_rank > 1:
-                new_community = community_candidate
-            else:
-                new_community = max(community_candidate, curr_community)
-
-            new_community_map[uuid] = new_community
-
-            if new_community != curr_community:
-                no_change = False
-
-        if no_change:
-            break
-
-        community_map = new_community_map
-
-    community_cluster_map = defaultdict(list)
-    for uuid, community in community_map.items():
-        community_cluster_map[community].append(uuid)
-
-    clusters = [cluster for cluster in community_cluster_map.values()]
-    return clusters
-
-
-async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
+async def _summarize_pair_llm(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
     # Prepare context for LLM
     context = {
         'node_summaries': [{'summary': summary} for summary in summary_pair],
@@ -155,7 +123,55 @@ async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -
     return truncate_at_sentence(pair_summary, MAX_SUMMARY_CHARS)
 
 
-async def generate_summary_description(llm_client: LLMClient, summary: str) -> str:
+def _merge_summaries_deterministically(summary_pair: tuple[str, str]) -> str:
+    # Split the budget before joining: truncating the joined text instead would cut back to the
+    # last sentence end, which drops the whole right side when it has no sentence terminator.
+    left, right = (s.strip() for s in summary_pair)
+    if not right:
+        return truncate_at_sentence(left, MAX_SUMMARY_CHARS)
+    if not left:
+        return truncate_at_sentence(right, MAX_SUMMARY_CHARS)
+    left = truncate_at_sentence(left, RESCUE_SUMMARY_CHARS)
+    # The right side gets whatever the left left over, minus the separating space. Since
+    # truncate_at_sentence hard-cuts when there is no sentence end, it never comes back empty.
+    right = truncate_at_sentence(right, max(MAX_SUMMARY_CHARS - len(left) - 1, 0))
+    return f'{left} {right}'.strip() if right else left
+
+
+async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
+    """Merge two summaries, surviving an exhausted LLM output budget.
+
+    At most 2 ``generate_response`` calls are made (the original prompt, then one retry with
+    shortened inputs); each call retries internally up to 4 attempts, so this issues at most
+    8 LLM requests before falling back to a deterministic merge.
+    """
+    try:
+        return await _summarize_pair_llm(llm_client, summary_pair)
+    except _RECOVERABLE_SUMMARY_ERRORS as e:
+        first_error: Exception = e
+
+    # Rescue 1: retry once with each input shortened. Skip it when shortening changes nothing,
+    # since the identical prompt would fail the same way.
+    shortened = (
+        truncate_at_sentence(summary_pair[0], RESCUE_SUMMARY_CHARS),
+        truncate_at_sentence(summary_pair[1], RESCUE_SUMMARY_CHARS),
+    )
+    if shortened != summary_pair:
+        try:
+            return await _summarize_pair_llm(llm_client, shortened)
+        except _RECOVERABLE_SUMMARY_ERRORS as e:
+            first_error = e
+
+    # Rescue 2: deterministic merge without the LLM. The left side is capped at half the budget
+    # so a long left summary cannot crowd out the right one.
+    COMMUNITY_SUMMARY_FALLBACKS['summarize_pair'] += 1
+    logger.warning(
+        f'summarize_pair fell back to a deterministic merge after LLM failure: {first_error!r}'
+    )
+    return _merge_summaries_deterministically(summary_pair)
+
+
+async def _generate_summary_description_llm(llm_client: LLMClient, summary: str) -> str:
     context = {
         'summary': summary,
     }
@@ -169,6 +185,35 @@ async def generate_summary_description(llm_client: LLMClient, summary: str) -> s
     description = llm_response.get('description', '')
 
     return description
+
+
+async def generate_summary_description(llm_client: LLMClient, summary: str) -> str:
+    """Name a community from its summary, surviving an exhausted LLM output budget.
+
+    At most 2 ``generate_response`` calls are made (the original prompt, then one retry with a
+    shortened summary); each call retries internally up to 4 attempts, so this issues at most
+    8 LLM requests before falling back to the summary's leading sentence.
+    """
+    try:
+        return await _generate_summary_description_llm(llm_client, summary)
+    except _RECOVERABLE_SUMMARY_ERRORS as e:
+        first_error: Exception = e
+
+    # Rescue 1: retry once with a shortened summary, only if that changes the prompt.
+    shortened = truncate_at_sentence(summary, RESCUE_SUMMARY_CHARS)
+    if shortened != summary:
+        try:
+            return await _generate_summary_description_llm(llm_client, shortened)
+        except _RECOVERABLE_SUMMARY_ERRORS as e:
+            first_error = e
+
+    # Rescue 2: name the community after the leading sentence of its summary.
+    COMMUNITY_SUMMARY_FALLBACKS['summary_description'] += 1
+    logger.warning(
+        'generate_summary_description fell back to a summary prefix after LLM failure: '
+        f'{first_error!r}'
+    )
+    return truncate_at_sentence(summary, FALLBACK_NAME_CHARS)
 
 
 async def build_community(
@@ -217,7 +262,15 @@ async def build_communities(
     driver: GraphDriver,
     llm_client: LLMClient,
     group_ids: list[str] | None,
+    embedder: EmbedderClient | None = None,
 ) -> tuple[list[CommunityNode], list[CommunityEdge]]:
+    """Build communities via label propagation and embed their summaries for search.
+
+    Community summary search is wired up for Neo4j and FalkorDB only. Kuzu's `community_name` FTS
+    index covers `name` but not `summary`, and Neptune's AOSS mirror only carries `name`/`uuid`/
+    `group_id` (see `save_to_aoss` in `driver/neptune/operations/community_node_ops.py`) — on
+    those two providers `summary_embedding` is still computed and saved, but unreachable by search.
+    """
     community_clusters = await get_community_clusters(driver, group_ids)
 
     semaphore = asyncio.Semaphore(MAX_COMMUNITY_BUILD_CONCURRENCY)
@@ -238,7 +291,44 @@ async def build_communities(
         community_nodes.append(community[0])
         community_edges.extend(community[1])
 
+    if embedder is not None:
+        await _embed_community_summaries(embedder, community_nodes)
+
     return community_nodes, community_edges
+
+
+async def _embed_community_summaries(
+    embedder: EmbedderClient, community_nodes: list[CommunityNode]
+) -> None:
+    """Embed every community's summary, batching the embedder call when the client supports it.
+
+    `build_communities` can produce many communities in one run, so a single `create_batch` call
+    is far cheaper than one `create` round trip per community. `EmbedderClient.create_batch`
+    raises `NotImplementedError` unless a concrete client overrides it, so clients that don't
+    support batching fall back to embedding one summary at a time, same as before.
+    """
+    pending: list[tuple[CommunityNode, str]] = []
+    for node in community_nodes:
+        text = node.summary.replace('\n', ' ').strip()
+        if not text:
+            node.summary_embedding = None
+            continue
+        pending.append((node, text))
+
+    if not pending:
+        return
+
+    try:
+        embeddings = await embedder.create_batch([text for _, text in pending])
+    except NotImplementedError:
+        await semaphore_gather(
+            *[node.generate_summary_embedding(embedder) for node, _ in pending],
+            max_coroutines=MAX_COMMUNITY_BUILD_CONCURRENCY,
+        )
+        return
+
+    for (node, _), embedding in zip(pending, embeddings, strict=True):
+        node.summary_embedding = embedding
 
 
 async def remove_communities(driver: GraphDriver, group_ids: list[str] | None = None):
@@ -353,6 +443,9 @@ async def update_community(
 
     community.summary = new_summary
     community.name = new_name
+    # Single-community update (one entity at a time), so there is nothing to batch the way
+    # `_embed_community_summaries` batches embedder calls across many communities.
+    await community.generate_summary_embedding(embedder)
 
     community_edges = []
     if is_new:

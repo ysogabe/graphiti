@@ -51,6 +51,7 @@ from graphiti_core.utils.maintenance.dedup_helpers import (
     _promote_resolved_node,
     _resolve_with_similarity,
 )
+from graphiti_core.utils.maintenance.llm_structured import generate_structured
 from graphiti_core.utils.text_utils import (
     MAX_SUMMARY_CHARS,
     concatenate_episodes,
@@ -549,13 +550,17 @@ async def _resolve_with_llm(
         ),
     }
 
-    llm_response = await llm_client.generate_response(
+    llm_response = await generate_structured(
+        llm_client,
         prompt_library.dedupe_nodes.nodes(context),
-        response_model=NodeResolutions,
+        NodeResolutions,
         prompt_name='dedupe_nodes.nodes',
+        # Fail open: no resolutions at all leaves every extracted node unresolved (no merge),
+        # which is safe — the nodes and their embeddings are still created.
+        fallback=NodeResolutions,
     )
 
-    node_resolutions: list[NodeDuplicate] = NodeResolutions(**llm_response).entity_resolutions
+    node_resolutions: list[NodeDuplicate] = llm_response.entity_resolutions
 
     valid_relative_range = range(len(state.unresolved_indices))
     processed_relative_ids: set[int] = set()

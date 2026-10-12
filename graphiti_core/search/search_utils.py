@@ -1140,6 +1140,11 @@ async def community_similarity_search(
         if driver.provider == GraphProvider.KUZU:
             search_vector_var = f'CAST($search_vector AS FLOAT[{len(search_vector)}])'
 
+        # TODO: 要 backfill existing Community nodes; until then, use their name_embedding.
+        community_embedding = 'c.name_embedding'
+        if driver.provider in (GraphProvider.NEO4J, GraphProvider.FALKORDB):
+            community_embedding = 'coalesce(c.summary_embedding, c.name_embedding)'
+
         query = (
             """
                                                                                                                                     MATCH (c:Community)
@@ -1148,7 +1153,7 @@ async def community_similarity_search(
             + """
             WITH c,
             """
-            + get_vector_cosine_func_query('c.name_embedding', search_vector_var, driver.provider)
+            + get_vector_cosine_func_query(community_embedding, search_vector_var, driver.provider)
             + """ AS score
             WHERE score > $min_score
             RETURN
